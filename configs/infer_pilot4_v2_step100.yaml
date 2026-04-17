@@ -1,0 +1,65 @@
+project:
+  name: sdxl_controlnet_inpaint_project
+  output_dir: ./outputs/run5_pilot4_from_scratch_masks_step100_preview
+  seed: 42
+
+data:
+  all_metadata_path: ./examples/metadata_pilot4_v2_all.jsonl
+  train_metadata_path: ./examples/metadata_pilot4_v2_train.jsonl
+  val_metadata_path: ./examples/metadata_pilot4_v2_val.jsonl
+  image_size: 384
+  image_width: 384
+  image_height: 512
+  center_crop: false
+  random_flip: false
+  mask_dilate: 0
+  prompt_dropout: 0.0
+
+model:
+  pretrained_model_name_or_path: diffusers/stable-diffusion-xl-1.0-inpainting-0.1
+  controlnet_model_name_or_path: null
+  vae_model_name_or_path: null
+  revision: null
+  variant: fp16
+  conditioning_type: pose
+  prediction_type: epsilon
+
+training:
+  train_batch_size: 1
+  num_workers: 0
+  num_epochs: 1
+  max_train_steps: 1
+  gradient_accumulation_steps: 1
+  learning_rate: 1.0e-5
+  weight_decay: 1.0e-2
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_epsilon: 1.0e-8
+  max_grad_norm: 1.0
+  lr_scheduler: constant
+  lr_warmup_steps: 0
+  mixed_precision: "fp16"
+  gradient_checkpointing: true
+  resume_from_checkpoint: null
+  save_every_steps: 100
+  validate_every_steps: 0
+
+validation:
+  num_inference_steps: 30
+  guidance_scale: 5.0
+  max_val_samples: 4
+
+inference:
+  metadata_path: ./examples/metadata_pilot4_v2_all.jsonl
+  checkpoint_dir: ./outputs/run5_pilot4_from_scratch_masks/checkpoints/step_00000100/controlnet
+  output_dir: ./outputs/run5_pilot4_from_scratch_masks_step100_preview/infer_all
+  prompt: null
+  source_image: null
+  mask_image: null
+  conditioning_image: null
+  output_path: ./outputs/infer/sample.png
+  negative_prompt: "low quality, blurry, distorted, deformed body, broken clothes, extra limbs"
+  num_inference_steps: 30
+  guidance_scale: 5.0
+  controlnet_conditioning_scale: 1.0
+  strength: 0.85

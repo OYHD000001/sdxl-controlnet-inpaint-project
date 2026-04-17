@@ -1,0 +1,27 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+.idea/
+.vscode/
+outputs/
+logs/
+checkpoints/
+tmp/
+cache/
+*.ckpt
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.log
+
+# Local experiment data and generated pilot assets
+examples/metadata_*.jsonl
+!examples/metadata_example.jsonl
+examples/pilot4_inputs/
+examples/pilot4_person_minus_clothes_masks/
+examples/pilot4_person_minus_clothes_masks_d12/
+examples/pilot4_edit_masks_from_scratch/

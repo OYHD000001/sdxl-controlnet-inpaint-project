@@ -1,0 +1,1 @@
+{"target_image":"/abs/path/to/target_image.png","source_image":"/abs/path/to/source_image.png","mask_image":"/abs/path/to/mask_image.png","conditioning_image":"/abs/path/to/conditioning_image.png","text":"replace the human model with a mannequin while preserving the same clothes, composition, and background"}

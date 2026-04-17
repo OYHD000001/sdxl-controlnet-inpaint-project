@@ -1,0 +1,7 @@
+face
+head
+hair
+neck
+hand
+skin
+ear
