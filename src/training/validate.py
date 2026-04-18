@@ -9,6 +9,7 @@ from diffusers import ControlNetModel, StableDiffusionXLControlNetInpaintPipelin
 from PIL import Image
 from tqdm.auto import tqdm
 from src.utils.io import ensure_dir, load_config, load_jsonl, load_pil_image
+from src.utils.masks import invert_binary_mask, invert_conditioning_image
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,6 +48,7 @@ def run_inference(config: dict[str, Any]) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_cfg = config["model"]
     infer_cfg = config["inference"]
+    invert_mask = bool(infer_cfg.get("invert_mask", config["data"].get("invert_mask", False)))
 
     checkpoint_dir = Path(infer_cfg["checkpoint_dir"])
     if not checkpoint_dir.exists():
@@ -76,6 +78,10 @@ def run_inference(config: dict[str, Any]) -> None:
         source_image = load_pil_image(record["source_image"]).convert("RGB")
         mask_image = load_pil_image(record["mask_image"]).convert("L")
         conditioning_image = load_pil_image(record["conditioning_image"]).convert("RGB")
+        if invert_mask:
+            mask_image = invert_binary_mask(mask_image)
+            if record["conditioning_image"] == record["mask_image"]:
+                conditioning_image = invert_conditioning_image(conditioning_image)
         original_size = source_image.size
         source_image, mask_image, conditioning_image = _resize_for_inference(
             source_image=source_image,

@@ -9,7 +9,12 @@ from torch.utils.data import Dataset
 
 from src.data.transforms import build_train_transforms
 from src.utils.io import load_jsonl, load_pil_image
-from src.utils.masks import apply_binary_mask_to_image, ensure_mask_is_single_channel
+from src.utils.masks import (
+    apply_binary_mask_to_image,
+    ensure_mask_is_single_channel,
+    invert_binary_mask,
+    invert_conditioning_image,
+)
 from src.utils.prompts import maybe_drop_prompt
 
 
@@ -49,6 +54,7 @@ class SDXLControlNetInpaintDataset(Dataset):
         center_crop: bool = False,
         random_flip: bool = False,
         prompt_dropout: float = 0.0,
+        invert_mask: bool = False,
     ) -> None:
         self.metadata_path = Path(metadata_path)
         self.records = load_jsonl(self.metadata_path)
@@ -59,6 +65,7 @@ class SDXLControlNetInpaintDataset(Dataset):
             random_flip=random_flip,
         )
         self.prompt_dropout = prompt_dropout
+        self.invert_mask = invert_mask
 
     def __len__(self) -> int:
         return len(self.records)
@@ -80,6 +87,11 @@ class SDXLControlNetInpaintDataset(Dataset):
         source_image = load_pil_image(sample.source_image).convert("RGB")
         mask_image = ensure_mask_is_single_channel(load_pil_image(sample.mask_image))
         conditioning_image = load_pil_image(sample.conditioning_image).convert("RGB")
+
+        if self.invert_mask:
+            mask_image = invert_binary_mask(mask_image)
+            if Path(sample.conditioning_image) == Path(sample.mask_image):
+                conditioning_image = invert_conditioning_image(conditioning_image)
 
         if sample.masked_source_image:
             masked_source_image = load_pil_image(sample.masked_source_image).convert("RGB")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,7 @@ def build_dataloader(config: dict[str, Any]) -> DataLoader:
         center_crop=data_cfg.get("center_crop", False),
         random_flip=data_cfg.get("random_flip", False),
         prompt_dropout=data_cfg.get("prompt_dropout", 0.0),
+        invert_mask=data_cfg.get("invert_mask", False),
     )
     return DataLoader(
         dataset,
@@ -103,6 +105,8 @@ def main() -> None:
     ensure_dir(output_dir / "checkpoints")
     ensure_dir(output_dir / "logs")
     save_json(config, output_dir / "resolved_config.json")
+    loss_history_path = output_dir / "logs" / "loss_history.jsonl"
+    loss_history_path.write_text("", encoding="utf-8")
 
     seed = int(config["project"]["seed"])
     torch.manual_seed(seed)
@@ -146,6 +150,18 @@ def main() -> None:
             global_step += 1
             progress_bar.update(1)
             progress_bar.set_postfix(loss=f"{metrics['loss']:.4f}")
+
+            with loss_history_path.open("a", encoding="utf-8") as f:
+                f.write(
+                    json.dumps(
+                        {
+                            "step": global_step,
+                            "loss": metrics["loss"],
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
 
             if global_step % save_every_steps == 0:
                 checkpoint_dir = output_dir / "checkpoints" / f"step_{global_step:08d}"
