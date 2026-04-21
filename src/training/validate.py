@@ -35,13 +35,17 @@ def _resize_for_inference(
     source_image: Image.Image,
     mask_image: Image.Image,
     conditioning_image: Image.Image,
+    conditioning_image_2: Image.Image | None,
     image_height: int,
     image_width: int,
-) -> tuple[Image.Image, Image.Image, Image.Image]:
+) -> tuple[Image.Image, Image.Image, Image.Image, Image.Image | None]:
     resized_source = source_image.resize((image_width, image_height), Image.BILINEAR)
     resized_mask = mask_image.resize((image_width, image_height), Image.NEAREST)
     resized_conditioning = conditioning_image.resize((image_width, image_height), Image.BILINEAR)
-    return resized_source, resized_mask, resized_conditioning
+    resized_conditioning_2 = None
+    if conditioning_image_2 is not None:
+        resized_conditioning_2 = conditioning_image_2.resize((image_width, image_height), Image.BILINEAR)
+    return resized_source, resized_mask, resized_conditioning, resized_conditioning_2
 
 
 def run_inference(config: dict[str, Any]) -> None:
@@ -54,12 +58,23 @@ def run_inference(config: dict[str, Any]) -> None:
     if not checkpoint_dir.exists():
         raise FileNotFoundError(f"ControlNet checkpoint not found: {checkpoint_dir}")
 
-    controlnet = ControlNetModel.from_pretrained(checkpoint_dir, torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32)
+    torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    controlnet_dirs = []
+    if (checkpoint_dir / "controlnet_0").exists():
+        index = 0
+        while (checkpoint_dir / f"controlnet_{index}").exists():
+            controlnet_dirs.append(checkpoint_dir / f"controlnet_{index}")
+            index += 1
+    else:
+        controlnet_dirs.append(checkpoint_dir)
+
+    controlnets = [ControlNetModel.from_pretrained(path, torch_dtype=torch_dtype) for path in controlnet_dirs]
+    controlnet = controlnets[0] if len(controlnets) == 1 else controlnets
     pipe = StableDiffusionXLControlNetInpaintPipeline.from_pretrained(
         model_cfg["pretrained_model_name_or_path"],
         controlnet=controlnet,
         variant=model_cfg.get("variant"),
-        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        torch_dtype=torch_dtype,
     )
     pipe.to(device)
     pipe.set_progress_bar_config(disable=False)
@@ -78,29 +93,35 @@ def run_inference(config: dict[str, Any]) -> None:
         source_image = load_pil_image(record["source_image"]).convert("RGB")
         mask_image = load_pil_image(record["mask_image"]).convert("L")
         conditioning_image = load_pil_image(record["conditioning_image"]).convert("RGB")
+        conditioning_image_2 = None
+        if record.get("conditioning_image_2"):
+            conditioning_image_2 = load_pil_image(record["conditioning_image_2"]).convert("RGB")
         if invert_mask:
             mask_image = invert_binary_mask(mask_image)
             if record["conditioning_image"] == record["mask_image"]:
                 conditioning_image = invert_conditioning_image(conditioning_image)
         original_size = source_image.size
-        source_image, mask_image, conditioning_image = _resize_for_inference(
+        source_image, mask_image, conditioning_image, conditioning_image_2 = _resize_for_inference(
             source_image=source_image,
             mask_image=mask_image,
             conditioning_image=conditioning_image,
+            conditioning_image_2=conditioning_image_2,
             image_height=image_height,
             image_width=image_width,
         )
         prompt = infer_cfg.get("prompt") or record["text"]
+        control_image = conditioning_image if conditioning_image_2 is None else [conditioning_image, conditioning_image_2]
+        control_scales = infer_cfg.get("controlnet_conditioning_scale", 1.0)
         with torch.inference_mode():
             result = pipe(
                 prompt=prompt,
                 image=source_image,
                 mask_image=mask_image,
-                control_image=conditioning_image,
+                control_image=control_image,
                 negative_prompt=infer_cfg.get("negative_prompt"),
                 num_inference_steps=int(infer_cfg["num_inference_steps"]),
                 guidance_scale=float(infer_cfg["guidance_scale"]),
-                controlnet_conditioning_scale=float(infer_cfg["controlnet_conditioning_scale"]),
+                controlnet_conditioning_scale=control_scales,
                 strength=float(infer_cfg["strength"]),
             )
         image = result.images[0]

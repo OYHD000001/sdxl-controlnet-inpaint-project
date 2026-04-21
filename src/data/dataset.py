@@ -24,6 +24,7 @@ class SamplePaths:
     source_image: str
     mask_image: str
     conditioning_image: str
+    conditioning_image_2: str | None
     text: str
     masked_source_image: str | None = None
 
@@ -76,6 +77,7 @@ class SDXLControlNetInpaintDataset(Dataset):
             source_image=record["source_image"],
             mask_image=record["mask_image"],
             conditioning_image=record["conditioning_image"],
+            conditioning_image_2=record.get("conditioning_image_2"),
             text=record["text"],
             masked_source_image=record.get("masked_source_image"),
         )
@@ -87,6 +89,9 @@ class SDXLControlNetInpaintDataset(Dataset):
         source_image = load_pil_image(sample.source_image).convert("RGB")
         mask_image = ensure_mask_is_single_channel(load_pil_image(sample.mask_image))
         conditioning_image = load_pil_image(sample.conditioning_image).convert("RGB")
+        conditioning_image_2 = None
+        if sample.conditioning_image_2:
+            conditioning_image_2 = load_pil_image(sample.conditioning_image_2).convert("RGB")
 
         if self.invert_mask:
             mask_image = invert_binary_mask(mask_image)
@@ -104,6 +109,7 @@ class SDXLControlNetInpaintDataset(Dataset):
             mask_image=mask_image,
             masked_source_image=masked_source_image,
             conditioning_image=conditioning_image,
+            conditioning_image_2=conditioning_image_2,
         )
 
         text = maybe_drop_prompt(sample.text, self.prompt_dropout)
@@ -114,6 +120,7 @@ class SDXLControlNetInpaintDataset(Dataset):
             "mask_image": transformed["mask_image"],
             "masked_source_image": transformed["masked_source_image"],
             "conditioning_image": transformed["conditioning_image"],
+            "conditioning_image_2": transformed.get("conditioning_image_2"),
             "text": text,
             "metadata": self.records[index],
         }
@@ -121,7 +128,7 @@ class SDXLControlNetInpaintDataset(Dataset):
 
 
 def collate_fn(samples: list[dict[str, Any]]) -> dict[str, Any]:
-    return {
+    batch = {
         "target_image": torch.stack([sample["target_image"] for sample in samples], dim=0),
         "source_image": torch.stack([sample["source_image"] for sample in samples], dim=0),
         "mask_image": torch.stack([sample["mask_image"] for sample in samples], dim=0),
@@ -130,3 +137,6 @@ def collate_fn(samples: list[dict[str, Any]]) -> dict[str, Any]:
         "text": [sample["text"] for sample in samples],
         "metadata": [sample["metadata"] for sample in samples],
     }
+    if all(sample.get("conditioning_image_2") is not None for sample in samples):
+        batch["conditioning_image_2"] = torch.stack([sample["conditioning_image_2"] for sample in samples], dim=0)
+    return batch

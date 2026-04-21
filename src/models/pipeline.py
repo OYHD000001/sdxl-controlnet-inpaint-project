@@ -17,7 +17,7 @@ class SDXLControlNetInpaintComponents:
     text_encoder_two: CLIPTextModelWithProjection
     vae: AutoencoderKL
     unet: UNet2DConditionModel
-    controlnet: ControlNetModel
+    controlnets: list[ControlNetModel]
     noise_scheduler: DDPMScheduler
 
 
@@ -140,14 +140,27 @@ class SDXLControlNetInpaintTrainerPipeline:
         )
 
         controlnet_name = model_cfg.get("controlnet_model_name_or_path")
-        if controlnet_name:
-            controlnet = ControlNetModel.from_pretrained(
-                controlnet_name,
-                revision=revision,
-                variant=variant,
-            )
+        controlnet_names = model_cfg.get("controlnet_model_name_or_paths")
+        if controlnet_names:
+            controlnets = [
+                ControlNetModel.from_pretrained(
+                    name,
+                    revision=revision,
+                    variant=variant,
+                )
+                for name in controlnet_names
+            ]
+        elif controlnet_name:
+            controlnets = [
+                ControlNetModel.from_pretrained(
+                    controlnet_name,
+                    revision=revision,
+                    variant=variant,
+                )
+            ]
         else:
-            controlnet = cls._build_4ch_controlnet_from_inpaint_unet(unet)
+            num_controlnets = int(model_cfg.get("num_controlnets", 1))
+            controlnets = [cls._build_4ch_controlnet_from_inpaint_unet(unet) for _ in range(num_controlnets)]
 
         noise_scheduler = DDPMScheduler.from_pretrained(model_name, subfolder="scheduler", revision=revision)
 
@@ -158,7 +171,7 @@ class SDXLControlNetInpaintTrainerPipeline:
             text_encoder_two=text_encoder_two,
             vae=vae,
             unet=unet,
-            controlnet=controlnet,
+            controlnets=controlnets,
             noise_scheduler=noise_scheduler,
         )
         return cls(components=components, device=device)
@@ -176,15 +189,29 @@ class SDXLControlNetInpaintTrainerPipeline:
 
         unet_dtype = torch.float16 if device.type == "cuda" else torch.float32
         self.components.unet.to(device=device, dtype=unet_dtype)
-        self.components.controlnet.to(device=device, dtype=torch.float32)
+        if hasattr(self.components.unet, "set_attention_slice"):
+            self.components.unet.set_attention_slice("max")
+        # Keep trainable ControlNet weights in fp32 for stable optimization.
+        # Mixed-precision savings still come from autocast during the forward pass.
+        controlnet_dtype = torch.float32
+        for controlnet in self.components.controlnets:
+            controlnet.to(device=device, dtype=controlnet_dtype)
+            if hasattr(controlnet, "set_attention_slice"):
+                controlnet.set_attention_slice("max")
 
-    def set_train(self) -> None:
+    def set_train(self, trainable_module_patterns: list[str] | None = None) -> None:
         self.components.text_encoder_one.requires_grad_(False)
         self.components.text_encoder_two.requires_grad_(False)
         self.components.vae.requires_grad_(False)
         self.components.unet.requires_grad_(False)
-        self.components.controlnet.requires_grad_(True)
-        self.components.controlnet.train()
+        for controlnet in self.components.controlnets:
+            controlnet.requires_grad_(True)
+            if trainable_module_patterns:
+                controlnet.requires_grad_(False)
+                for name, parameter in controlnet.named_parameters():
+                    if any(pattern in name for pattern in trainable_module_patterns):
+                        parameter.requires_grad_(True)
+            controlnet.train()
         self.components.unet.eval()
         self.components.text_encoder_one.eval()
         self.components.text_encoder_two.eval()
@@ -256,7 +283,12 @@ class SDXLControlNetInpaintTrainerPipeline:
         model_input = torch.cat([noisy_latents, resized_mask, masked_source_latents], dim=1)
 
         prompt_data = self.encode_prompt(batch["text"])
-        conditioning_image = batch["conditioning_image"].to(self.device, dtype=self.components.controlnet.dtype)
+        conditioning_images = []
+        for index, controlnet in enumerate(self.components.controlnets):
+            key = "conditioning_image" if index == 0 else f"conditioning_image_{index + 1}"
+            if key not in batch:
+                raise KeyError(f"Missing batch key for dual control input: {key}")
+            conditioning_images.append(batch[key].to(self.device, dtype=controlnet.dtype))
 
         return {
             "target_latents": target_latents,
@@ -267,7 +299,7 @@ class SDXLControlNetInpaintTrainerPipeline:
             "masked_source_latents": masked_source_latents,
             "mask": resized_mask,
             "model_input": model_input,
-            "conditioning_image": conditioning_image,
+            "conditioning_images": conditioning_images,
             "prompt_embeds": prompt_data["prompt_embeds"],
             "pooled_prompt_embeds": prompt_data["pooled_prompt_embeds"],
         }
@@ -292,14 +324,25 @@ class SDXLControlNetInpaintTrainerPipeline:
             "time_ids": time_ids,
         }
 
-        down_block_res_samples, mid_block_res_sample = self.components.controlnet(
-            prepared["control_model_input"],
-            prepared["timesteps"],
-            encoder_hidden_states=prepared["prompt_embeds"],
-            controlnet_cond=prepared["conditioning_image"],
-            added_cond_kwargs=added_cond_kwargs,
-            return_dict=False,
-        )
+        down_block_res_samples = None
+        mid_block_res_sample = None
+        for controlnet, conditioning_image in zip(self.components.controlnets, prepared["conditioning_images"]):
+            current_down_block_res_samples, current_mid_block_res_sample = controlnet(
+                prepared["control_model_input"],
+                prepared["timesteps"],
+                encoder_hidden_states=prepared["prompt_embeds"],
+                controlnet_cond=conditioning_image,
+                added_cond_kwargs=added_cond_kwargs,
+                return_dict=False,
+            )
+            if down_block_res_samples is None:
+                down_block_res_samples = list(current_down_block_res_samples)
+                mid_block_res_sample = current_mid_block_res_sample
+            else:
+                down_block_res_samples = [
+                    base + extra for base, extra in zip(down_block_res_samples, current_down_block_res_samples)
+                ]
+                mid_block_res_sample = mid_block_res_sample + current_mid_block_res_sample
 
         model_pred = self.components.unet(
             prepared["model_input"],

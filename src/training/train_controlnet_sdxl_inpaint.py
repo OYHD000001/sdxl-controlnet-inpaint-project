@@ -51,7 +51,9 @@ def build_dataloader(config: dict[str, Any]) -> DataLoader:
 
 def build_optimizer(pipeline: SDXLControlNetInpaintTrainerPipeline, config: dict[str, Any]) -> torch.optim.Optimizer:
     train_cfg = config["training"]
-    params = list(pipeline.components.controlnet.parameters())
+    params = []
+    for controlnet in pipeline.components.controlnets:
+        params.extend([parameter for parameter in controlnet.parameters() if parameter.requires_grad])
 
     # TODO:
     # Decide whether UNet should be partially or fully trainable in your final setup.
@@ -84,12 +86,24 @@ def train_one_step(
     if scaler is not None and use_autocast and mixed_precision == "fp16":
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(pipeline.components.controlnet.parameters(), max_grad_norm)
+        params = [
+            p
+            for controlnet in pipeline.components.controlnets
+            for p in controlnet.parameters()
+            if p.grad is not None
+        ]
+        torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
         scaler.step(optimizer)
         scaler.update()
     else:
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(pipeline.components.controlnet.parameters(), max_grad_norm)
+        params = [
+            p
+            for controlnet in pipeline.components.controlnets
+            for p in controlnet.parameters()
+            if p.grad is not None
+        ]
+        torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
         optimizer.step()
     optimizer.zero_grad(set_to_none=True)
     return {"loss": float(loss.detach().cpu().item())}
@@ -118,12 +132,19 @@ def main() -> None:
     dataloader = build_dataloader(config)
     pipeline = SDXLControlNetInpaintTrainerPipeline.from_pretrained_config(config["model"], device=device)
     pipeline.to(device)
-    pipeline.set_train()
+    pipeline.set_train(trainable_module_patterns=config["training"].get("trainable_module_patterns"))
     if train_cfg.get("gradient_checkpointing", False):
         pipeline.components.unet.enable_gradient_checkpointing()
-        pipeline.components.controlnet.enable_gradient_checkpointing()
+        for controlnet in pipeline.components.controlnets:
+            controlnet.enable_gradient_checkpointing()
     optimizer = build_optimizer(pipeline, config)
-    scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available() and train_cfg.get("mixed_precision") == "fp16")
+    trainable_params = [p for controlnet in pipeline.components.controlnets for p in controlnet.parameters() if p.requires_grad]
+    can_use_fp16_scaler = (
+        torch.cuda.is_available()
+        and train_cfg.get("mixed_precision") == "fp16"
+        and all(p.dtype == torch.float32 for p in trainable_params)
+    )
+    scaler = torch.amp.GradScaler("cuda", enabled=can_use_fp16_scaler)
 
     max_train_steps = int(train_cfg["max_train_steps"])
     save_every_steps = int(train_cfg["save_every_steps"])
@@ -166,7 +187,9 @@ def main() -> None:
             if global_step % save_every_steps == 0:
                 checkpoint_dir = output_dir / "checkpoints" / f"step_{global_step:08d}"
                 ensure_dir(checkpoint_dir)
-                pipeline.components.controlnet.save_pretrained(checkpoint_dir / "controlnet")
+                for index, controlnet in enumerate(pipeline.components.controlnets):
+                    controlnet_dir = checkpoint_dir / ("controlnet" if len(pipeline.components.controlnets) == 1 else f"controlnet_{index}")
+                    controlnet.save_pretrained(controlnet_dir)
                 save_json({"global_step": global_step, **metrics}, checkpoint_dir / "train_state.json")
 
             if validate_every_steps > 0 and global_step % validate_every_steps == 0:
@@ -177,7 +200,9 @@ def main() -> None:
 
     final_dir = output_dir / "checkpoints" / "final"
     ensure_dir(final_dir)
-    pipeline.components.controlnet.save_pretrained(final_dir / "controlnet")
+    for index, controlnet in enumerate(pipeline.components.controlnets):
+        controlnet_dir = final_dir / ("controlnet" if len(pipeline.components.controlnets) == 1 else f"controlnet_{index}")
+        controlnet.save_pretrained(controlnet_dir)
     save_json({"global_step": global_step}, final_dir / "train_state.json")
     print(f"Training scaffold completed. Final artifacts saved to: {final_dir}")
 

@@ -60,6 +60,7 @@ class SDXLTrainTransforms:
         mask_image: Image.Image,
         masked_source_image: Image.Image,
         conditioning_image: Image.Image,
+        conditioning_image_2: Image.Image | None = None,
     ) -> dict[str, Any]:
         do_flip = self.random_flip and random.random() < 0.5
 
@@ -70,17 +71,22 @@ class SDXLTrainTransforms:
             "masked_source_image": self._crop(self._resize(masked_source_image, is_mask=False), is_mask=False),
             "conditioning_image": self._crop(self._resize(conditioning_image, is_mask=False), is_mask=False),
         }
+        if conditioning_image_2 is not None:
+            images["conditioning_image_2"] = self._crop(self._resize(conditioning_image_2, is_mask=False), is_mask=False)
 
         if do_flip:
             images = {key: TF.hflip(value) for key, value in images.items()}
 
-        return {
+        outputs = {
             "target_image": self._to_image_tensor(images["target_image"]),
             "source_image": self._to_image_tensor(images["source_image"]),
             "mask_image": self._to_mask_tensor(images["mask_image"]),
             "masked_source_image": self._to_image_tensor(images["masked_source_image"]),
             "conditioning_image": self._to_conditioning_tensor(images["conditioning_image"]),
         }
+        if "conditioning_image_2" in images:
+            outputs["conditioning_image_2"] = self._to_conditioning_tensor(images["conditioning_image_2"])
+        return outputs
 
 
 def build_train_transforms(
