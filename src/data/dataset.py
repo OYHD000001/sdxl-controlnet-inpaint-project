@@ -56,6 +56,7 @@ class SDXLControlNetInpaintDataset(Dataset):
         random_flip: bool = False,
         prompt_dropout: float = 0.0,
         invert_mask: bool = False,
+        conditioning_resize_modes: list[str] | None = None,
     ) -> None:
         self.metadata_path = Path(metadata_path)
         self.records = load_jsonl(self.metadata_path)
@@ -64,6 +65,7 @@ class SDXLControlNetInpaintDataset(Dataset):
             image_width=image_width,
             center_crop=center_crop,
             random_flip=random_flip,
+            conditioning_resize_modes=conditioning_resize_modes,
         )
         self.prompt_dropout = prompt_dropout
         self.invert_mask = invert_mask

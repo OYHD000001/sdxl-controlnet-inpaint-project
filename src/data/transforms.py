@@ -23,14 +23,21 @@ class SDXLTrainTransforms:
         image_width: int,
         center_crop: bool = False,
         random_flip: bool = False,
+        conditioning_resize_modes: list[str] | None = None,
     ) -> None:
         self.image_height = image_height
         self.image_width = image_width
         self.center_crop = center_crop
         self.random_flip = random_flip
+        self.conditioning_resize_modes = conditioning_resize_modes or ["bilinear", "bilinear"]
 
     def _resize(self, image: Image.Image, is_mask: bool) -> Image.Image:
         interpolation = Image.NEAREST if is_mask else Image.BILINEAR
+        return image.resize((self.image_width, self.image_height), interpolation)
+
+    def _resize_conditioning(self, image: Image.Image, index: int) -> Image.Image:
+        mode = self.conditioning_resize_modes[index] if index < len(self.conditioning_resize_modes) else "bilinear"
+        interpolation = Image.NEAREST if mode.lower() == "nearest" else Image.BILINEAR
         return image.resize((self.image_width, self.image_height), interpolation)
 
     def _crop(self, image: Image.Image, is_mask: bool) -> Image.Image:
@@ -69,10 +76,10 @@ class SDXLTrainTransforms:
             "source_image": self._crop(self._resize(source_image, is_mask=False), is_mask=False),
             "mask_image": self._crop(self._resize(mask_image, is_mask=True), is_mask=True),
             "masked_source_image": self._crop(self._resize(masked_source_image, is_mask=False), is_mask=False),
-            "conditioning_image": self._crop(self._resize(conditioning_image, is_mask=False), is_mask=False),
+            "conditioning_image": self._crop(self._resize_conditioning(conditioning_image, 0), is_mask=False),
         }
         if conditioning_image_2 is not None:
-            images["conditioning_image_2"] = self._crop(self._resize(conditioning_image_2, is_mask=False), is_mask=False)
+            images["conditioning_image_2"] = self._crop(self._resize_conditioning(conditioning_image_2, 1), is_mask=False)
 
         if do_flip:
             images = {key: TF.hflip(value) for key, value in images.items()}
@@ -94,10 +101,12 @@ def build_train_transforms(
     image_width: int,
     center_crop: bool = False,
     random_flip: bool = False,
+    conditioning_resize_modes: list[str] | None = None,
 ) -> SDXLTrainTransforms:
     return SDXLTrainTransforms(
         image_height=image_height,
         image_width=image_width,
         center_crop=center_crop,
         random_flip=random_flip,
+        conditioning_resize_modes=conditioning_resize_modes,
     )

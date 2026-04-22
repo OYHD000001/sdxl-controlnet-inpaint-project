@@ -38,13 +38,21 @@ def _resize_for_inference(
     conditioning_image_2: Image.Image | None,
     image_height: int,
     image_width: int,
+    conditioning_resize_modes: list[str] | None = None,
 ) -> tuple[Image.Image, Image.Image, Image.Image, Image.Image | None]:
+    conditioning_resize_modes = conditioning_resize_modes or ["bilinear", "bilinear"]
+    conditioning_interpolation_0 = Image.NEAREST if conditioning_resize_modes[0].lower() == "nearest" else Image.BILINEAR
+    conditioning_interpolation_1 = (
+        Image.NEAREST
+        if len(conditioning_resize_modes) > 1 and conditioning_resize_modes[1].lower() == "nearest"
+        else Image.BILINEAR
+    )
     resized_source = source_image.resize((image_width, image_height), Image.BILINEAR)
     resized_mask = mask_image.resize((image_width, image_height), Image.NEAREST)
-    resized_conditioning = conditioning_image.resize((image_width, image_height), Image.BILINEAR)
+    resized_conditioning = conditioning_image.resize((image_width, image_height), conditioning_interpolation_0)
     resized_conditioning_2 = None
     if conditioning_image_2 is not None:
-        resized_conditioning_2 = conditioning_image_2.resize((image_width, image_height), Image.BILINEAR)
+        resized_conditioning_2 = conditioning_image_2.resize((image_width, image_height), conditioning_interpolation_1)
     return resized_source, resized_mask, resized_conditioning, resized_conditioning_2
 
 
@@ -108,6 +116,7 @@ def run_inference(config: dict[str, Any]) -> None:
             conditioning_image_2=conditioning_image_2,
             image_height=image_height,
             image_width=image_width,
+            conditioning_resize_modes=config["data"].get("conditioning_resize_modes"),
         )
         prompt = infer_cfg.get("prompt") or record["text"]
         control_image = conditioning_image if conditioning_image_2 is None else [conditioning_image, conditioning_image_2]

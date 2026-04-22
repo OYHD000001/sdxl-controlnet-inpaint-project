@@ -36,6 +36,7 @@ class SDXLControlNetInpaintTrainerPipeline:
         self.device = device
         self.aux_device = torch.device("cpu")
         self.aux_dtype = torch.float32
+        self.controlnet_conditioning_scales = [1.0] * len(components.controlnets)
 
     @staticmethod
     def _build_4ch_controlnet_from_inpaint_unet(unet: UNet2DConditionModel) -> ControlNetModel:
@@ -139,25 +140,25 @@ class SDXLControlNetInpaintTrainerPipeline:
             variant=variant,
         )
 
-        controlnet_name = model_cfg.get("controlnet_model_name_or_path")
-        controlnet_names = model_cfg.get("controlnet_model_name_or_paths")
-        if controlnet_names:
-            controlnets = [
-                ControlNetModel.from_pretrained(
+        def load_controlnet(name: str) -> ControlNetModel:
+            try:
+                return ControlNetModel.from_pretrained(
                     name,
                     revision=revision,
                     variant=variant,
                 )
-                for name in controlnet_names
-            ]
-        elif controlnet_name:
-            controlnets = [
-                ControlNetModel.from_pretrained(
-                    controlnet_name,
+            except (OSError, ValueError):
+                return ControlNetModel.from_pretrained(
+                    name,
                     revision=revision,
-                    variant=variant,
                 )
-            ]
+
+        controlnet_name = model_cfg.get("controlnet_model_name_or_path")
+        controlnet_names = model_cfg.get("controlnet_model_name_or_paths")
+        if controlnet_names:
+            controlnets = [load_controlnet(name) for name in controlnet_names]
+        elif controlnet_name:
+            controlnets = [load_controlnet(controlnet_name)]
         else:
             num_controlnets = int(model_cfg.get("num_controlnets", 1))
             controlnets = [cls._build_4ch_controlnet_from_inpaint_unet(unet) for _ in range(num_controlnets)]
@@ -326,7 +327,10 @@ class SDXLControlNetInpaintTrainerPipeline:
 
         down_block_res_samples = None
         mid_block_res_sample = None
-        for controlnet, conditioning_image in zip(self.components.controlnets, prepared["conditioning_images"]):
+        for index, (controlnet, conditioning_image) in enumerate(
+            zip(self.components.controlnets, prepared["conditioning_images"])
+        ):
+            scale = self.controlnet_conditioning_scales[index] if index < len(self.controlnet_conditioning_scales) else 1.0
             current_down_block_res_samples, current_mid_block_res_sample = controlnet(
                 prepared["control_model_input"],
                 prepared["timesteps"],
@@ -335,6 +339,8 @@ class SDXLControlNetInpaintTrainerPipeline:
                 added_cond_kwargs=added_cond_kwargs,
                 return_dict=False,
             )
+            current_down_block_res_samples = [sample * scale for sample in current_down_block_res_samples]
+            current_mid_block_res_sample = current_mid_block_res_sample * scale
             if down_block_res_samples is None:
                 down_block_res_samples = list(current_down_block_res_samples)
                 mid_block_res_sample = current_mid_block_res_sample

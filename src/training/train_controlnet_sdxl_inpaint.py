@@ -38,6 +38,7 @@ def build_dataloader(config: dict[str, Any]) -> DataLoader:
         random_flip=data_cfg.get("random_flip", False),
         prompt_dropout=data_cfg.get("prompt_dropout", 0.0),
         invert_mask=data_cfg.get("invert_mask", False),
+        conditioning_resize_modes=data_cfg.get("conditioning_resize_modes"),
     )
     return DataLoader(
         dataset,
@@ -75,13 +76,19 @@ def train_one_step(
     max_grad_norm: float,
     mixed_precision: str,
     scaler: torch.cuda.amp.GradScaler | None,
+    keep_region_loss_weight: float,
 ) -> dict[str, float]:
     use_autocast = mixed_precision in {"fp16", "bf16"} and torch.cuda.is_available()
     autocast_dtype = torch.float16 if mixed_precision == "fp16" else torch.bfloat16
 
     with torch.autocast(device_type="cuda", dtype=autocast_dtype, enabled=use_autocast):
         loss_inputs = pipeline.forward_loss_inputs(batch)
-        loss = diffusion_mse_loss(loss_inputs["model_pred"], loss_inputs["noise"])
+        loss = diffusion_mse_loss(
+            loss_inputs["model_pred"],
+            loss_inputs["noise"],
+            mask=loss_inputs["mask"],
+            keep_region_weight=keep_region_loss_weight,
+        )
 
     if scaler is not None and use_autocast and mixed_precision == "fp16":
         scaler.scale(loss).backward()
@@ -132,6 +139,7 @@ def main() -> None:
     dataloader = build_dataloader(config)
     pipeline = SDXLControlNetInpaintTrainerPipeline.from_pretrained_config(config["model"], device=device)
     pipeline.to(device)
+    pipeline.controlnet_conditioning_scales = list(train_cfg.get("controlnet_conditioning_scale", [1.0] * len(pipeline.components.controlnets)))
     pipeline.set_train(trainable_module_patterns=config["training"].get("trainable_module_patterns"))
     if train_cfg.get("gradient_checkpointing", False):
         pipeline.components.unet.enable_gradient_checkpointing()
@@ -167,6 +175,7 @@ def main() -> None:
                 max_grad_norm=float(train_cfg["max_grad_norm"]),
                 mixed_precision=str(train_cfg.get("mixed_precision", "no")),
                 scaler=scaler,
+                keep_region_loss_weight=float(train_cfg.get("keep_region_loss_weight", 1.0)),
             )
             global_step += 1
             progress_bar.update(1)
