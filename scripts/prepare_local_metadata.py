@@ -60,6 +60,20 @@ def resolve_conditioning_path(stem: str, args: argparse.Namespace, mask_path: Pa
     raise ValueError(f"Unsupported conditioning mode: {args.conditioning_mode}")
 
 
+def resolve_target_path(stem: str, args: argparse.Namespace) -> Path:
+    exact = args.target_dir / f"{stem}{args.target_suffix}"
+    if exact.exists():
+        return exact
+
+    prefix = f"{stem}{args.target_suffix}"
+    for ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+        candidate = args.target_dir / f"{prefix}{ext}"
+        if candidate.exists():
+            return candidate
+
+    raise FileNotFoundError(f"Target image missing for {stem}: {exact}")
+
+
 def main() -> None:
     args = parse_args()
     source_paths = sorted(
@@ -72,9 +86,7 @@ def main() -> None:
     records = []
     for source_path in source_paths:
         stem = source_path.stem
-        target_path = args.target_dir / f"{stem}{args.target_suffix}"
-        if not target_path.exists():
-            raise FileNotFoundError(f"Target image missing for {stem}: {target_path}")
+        target_path = resolve_target_path(stem, args)
 
         mask_path = resolve_mask(stem, args.mask_dirs)
         conditioning_path = resolve_conditioning_path(stem, args, mask_path)

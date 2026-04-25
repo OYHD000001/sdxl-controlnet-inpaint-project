@@ -27,6 +27,10 @@ class SamplePaths:
     conditioning_image_2: str | None
     text: str
     masked_source_image: str | None = None
+    target_latents: str | None = None
+    masked_source_latents: str | None = None
+    prompt_embeds: str | None = None
+    pooled_prompt_embeds: str | None = None
 
 
 class SDXLControlNetInpaintDataset(Dataset):
@@ -82,6 +86,10 @@ class SDXLControlNetInpaintDataset(Dataset):
             conditioning_image_2=record.get("conditioning_image_2"),
             text=record["text"],
             masked_source_image=record.get("masked_source_image"),
+            target_latents=record.get("target_latents"),
+            masked_source_latents=record.get("masked_source_latents"),
+            prompt_embeds=record.get("prompt_embeds"),
+            pooled_prompt_embeds=record.get("pooled_prompt_embeds"),
         )
 
     def __getitem__(self, index: int) -> dict[str, Any]:
@@ -126,6 +134,11 @@ class SDXLControlNetInpaintDataset(Dataset):
             "text": text,
             "metadata": self.records[index],
         }
+        if sample.target_latents and sample.masked_source_latents and sample.prompt_embeds and sample.pooled_prompt_embeds:
+            batch["target_latents"] = torch.load(sample.target_latents, map_location="cpu", weights_only=True)
+            batch["masked_source_latents"] = torch.load(sample.masked_source_latents, map_location="cpu", weights_only=True)
+            batch["prompt_embeds"] = torch.load(sample.prompt_embeds, map_location="cpu", weights_only=True)
+            batch["pooled_prompt_embeds"] = torch.load(sample.pooled_prompt_embeds, map_location="cpu", weights_only=True)
         return batch
 
 
@@ -141,4 +154,9 @@ def collate_fn(samples: list[dict[str, Any]]) -> dict[str, Any]:
     }
     if all(sample.get("conditioning_image_2") is not None for sample in samples):
         batch["conditioning_image_2"] = torch.stack([sample["conditioning_image_2"] for sample in samples], dim=0)
+    if all(sample.get("target_latents") is not None for sample in samples):
+        batch["target_latents"] = torch.stack([sample["target_latents"] for sample in samples], dim=0)
+        batch["masked_source_latents"] = torch.stack([sample["masked_source_latents"] for sample in samples], dim=0)
+        batch["prompt_embeds"] = torch.stack([sample["prompt_embeds"] for sample in samples], dim=0)
+        batch["pooled_prompt_embeds"] = torch.stack([sample["pooled_prompt_embeds"] for sample in samples], dim=0)
     return batch

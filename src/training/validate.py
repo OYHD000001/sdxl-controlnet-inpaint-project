@@ -84,7 +84,12 @@ def run_inference(config: dict[str, Any]) -> None:
         variant=model_cfg.get("variant"),
         torch_dtype=torch_dtype,
     )
-    pipe.to(device)
+    if hasattr(pipe, "enable_vae_slicing"):
+        pipe.enable_vae_slicing()
+    if infer_cfg.get("enable_model_cpu_offload", False) and torch.cuda.is_available():
+        pipe.enable_model_cpu_offload()
+    else:
+        pipe.to(device)
     pipe.set_progress_bar_config(disable=False)
     image_height = int(config["data"].get("image_height", config["data"]["image_size"]))
     image_width = int(config["data"].get("image_width", config["data"]["image_size"]))
@@ -93,8 +98,12 @@ def run_inference(config: dict[str, Any]) -> None:
     records = load_jsonl(metadata_path)
     output_dir = ensure_dir(infer_cfg["output_dir"])
     for idx, record in enumerate(tqdm(records, desc="infer"), start=1):
-        stem = Path(record["source_image"]).stem
-        save_path = output_dir / f"{stem}_generated.png"
+        stem = record.get("output_name") or Path(record["source_image"]).stem
+        subdir = record.get("output_subdir")
+        save_dir = output_dir
+        if subdir:
+            save_dir = ensure_dir(output_dir / subdir)
+        save_path = save_dir / f"{stem}_generated.png"
         if save_path.exists():
             continue
 

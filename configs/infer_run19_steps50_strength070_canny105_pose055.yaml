@@ -1,11 +1,11 @@
 project:
   name: sdxl_controlnet_inpaint_project
-  output_dir: ./outputs/run15_dualcontrol_pretrained_canny_pose_50ep
+  output_dir: ./outputs/run18_4gpu_cached_fast_dualcontrol_pretrained_canny_pose_50ep
   seed: 42
 
 data:
   all_metadata_path: ./datasets/sourceeqtarget_clothescanny_pose_dualcontrol_noheadpose/metadata_all.jsonl
-  train_metadata_path: ./datasets/sourceeqtarget_clothescanny_pose_dualcontrol_noheadpose/metadata_train.jsonl
+  train_metadata_path: ./datasets/sourceeqtarget_clothescanny_pose_dualcontrol_noheadpose/metadata_train_latent_cached.jsonl
   val_metadata_path: ./datasets/sourceeqtarget_clothescanny_pose_dualcontrol_noheadpose/metadata_val.jsonl
   image_size: 384
   image_width: 384
@@ -31,12 +31,16 @@ model:
   variant: fp16
   conditioning_type: dual_control
   prediction_type: epsilon
+  attention_slicing: false
 
 training:
   train_batch_size: 1
-  num_workers: 0
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
   num_epochs: 50
-  max_train_steps: 19000
+  max_train_steps: 4750
   gradient_accumulation_steps: 1
   learning_rate: 5.0e-6
   weight_decay: 1.0e-2
@@ -49,7 +53,7 @@ training:
   mixed_precision: "bf16"
   gradient_checkpointing: true
   resume_from_checkpoint: null
-  save_every_steps: 1900
+  save_every_steps: 475
   validate_every_steps: 0
   controlnet_conditioning_scale:
     - 1.0
@@ -61,30 +65,31 @@ training:
     - "controlnet_mid_block"
 
 validation:
-  num_inference_steps: 30
+  num_inference_steps: 50
   guidance_scale: 5.0
   max_val_samples: 4
 
 inference:
   metadata_path: ./datasets/sourceeqtarget_clothescanny_pose_dualcontrol_noheadpose/metadata_val.jsonl
-  checkpoint_dir: ./outputs/run15_dualcontrol_pretrained_canny_pose_50ep/checkpoints/final
-  output_dir: ./outputs/run15_dualcontrol_pretrained_canny_pose_50ep/infer_test20
+  checkpoint_dir: ./outputs/run18_4gpu_cached_fast_dualcontrol_pretrained_canny_pose_50ep/checkpoints/final
+  output_dir: ./outputs/run19_infer_steps50_strength070_canny105_pose055/generated
   prompt: null
   source_image: null
   mask_image: null
   conditioning_image: null
   output_path: ./outputs/infer/sample.png
-  negative_prompt: "low quality, blurry, distorted, deformed body, broken clothes, extra limbs"
-  num_inference_steps: 30
+  negative_prompt: "low quality, blurry, distorted, deformed body, broken clothes, extra limbs, skeleton-like hands, bony hands, rough pose lines"
+  num_inference_steps: 50
   guidance_scale: 5.0
   controlnet_conditioning_scale:
-    - 1.0
-    - 0.9
-  strength: 0.85
+    - 1.05
+    - 0.55
+  strength: 0.70
   invert_mask: true
+  enable_model_cpu_offload: true
 
 preview:
   metadata_path: ./datasets/sourceeqtarget_clothescanny_pose_dualcontrol_noheadpose/metadata_train_preview4.jsonl
-  output_dir: ./outputs/run15_dualcontrol_pretrained_canny_pose_50ep/train_previews
-  every_steps: 1900
+  output_dir: ./outputs/run19_infer_steps50_strength070_canny105_pose055/train_previews
+  every_steps: 475
   max_wait_seconds: 604800

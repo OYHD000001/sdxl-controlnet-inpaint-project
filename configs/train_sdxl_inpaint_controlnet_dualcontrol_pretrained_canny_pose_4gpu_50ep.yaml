@@ -1,6 +1,6 @@
 project:
   name: sdxl_controlnet_inpaint_project
-  output_dir: ./outputs/run15_dualcontrol_pretrained_canny_pose_50ep
+  output_dir: ./outputs/run16_4gpu_dualcontrol_pretrained_canny_pose_50ep
   seed: 42
 
 data:
@@ -34,9 +34,10 @@ model:
 
 training:
   train_batch_size: 1
-  num_workers: 0
+  num_workers: 2
   num_epochs: 50
-  max_train_steps: 19000
+  # 380 train images / 4 GPUs / batch 1 ~= 95 optimizer steps per epoch.
+  max_train_steps: 4750
   gradient_accumulation_steps: 1
   learning_rate: 5.0e-6
   weight_decay: 1.0e-2
@@ -49,7 +50,8 @@ training:
   mixed_precision: "bf16"
   gradient_checkpointing: true
   resume_from_checkpoint: null
-  save_every_steps: 1900
+  # 5 epochs * 95 optimizer steps/epoch.
+  save_every_steps: 475
   validate_every_steps: 0
   controlnet_conditioning_scale:
     - 1.0
@@ -67,8 +69,8 @@ validation:
 
 inference:
   metadata_path: ./datasets/sourceeqtarget_clothescanny_pose_dualcontrol_noheadpose/metadata_val.jsonl
-  checkpoint_dir: ./outputs/run15_dualcontrol_pretrained_canny_pose_50ep/checkpoints/final
-  output_dir: ./outputs/run15_dualcontrol_pretrained_canny_pose_50ep/infer_test20
+  checkpoint_dir: ./outputs/run16_4gpu_dualcontrol_pretrained_canny_pose_50ep/checkpoints/final
+  output_dir: ./outputs/run16_4gpu_dualcontrol_pretrained_canny_pose_50ep/infer_test20
   prompt: null
   source_image: null
   mask_image: null
@@ -82,9 +84,10 @@ inference:
     - 0.9
   strength: 0.85
   invert_mask: true
+  enable_model_cpu_offload: true
 
 preview:
   metadata_path: ./datasets/sourceeqtarget_clothescanny_pose_dualcontrol_noheadpose/metadata_train_preview4.jsonl
-  output_dir: ./outputs/run15_dualcontrol_pretrained_canny_pose_50ep/train_previews
-  every_steps: 1900
+  output_dir: ./outputs/run16_4gpu_dualcontrol_pretrained_canny_pose_50ep/train_previews
+  every_steps: 475
   max_wait_seconds: 604800

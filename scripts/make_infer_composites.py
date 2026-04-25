@@ -42,6 +42,18 @@ def resize_panel(image: Image.Image, width: int, height: int, is_mask: bool) -> 
     return image.resize((width, height), interpolation)
 
 
+def resize_conditioning_panel(
+    image: Image.Image,
+    width: int,
+    height: int,
+    resize_modes: list[str],
+    index: int,
+) -> Image.Image:
+    mode = resize_modes[index] if index < len(resize_modes) else "bilinear"
+    interpolation = Image.NEAREST if mode.lower() == "nearest" else Image.BILINEAR
+    return image.resize((width, height), interpolation)
+
+
 def build_composite(images: list[tuple[str, Image.Image]]) -> Image.Image:
     labeled = [add_label(image, label) for label, image in images]
     width = sum(image.width for image in labeled)
@@ -64,6 +76,7 @@ def main() -> None:
     invert_mask = bool(infer_cfg.get("invert_mask", data_cfg.get("invert_mask", False)))
     image_width = int(data_cfg.get("image_width", data_cfg["image_size"]))
     image_height = int(data_cfg.get("image_height", data_cfg["image_size"]))
+    conditioning_resize_modes = data_cfg.get("conditioning_resize_modes", ["bilinear", "bilinear"])
 
     metadata_path = args.metadata_path or Path(infer_cfg["metadata_path"])
     infer_dir = args.infer_dir or Path(infer_cfg["output_dir"])
@@ -94,9 +107,21 @@ def main() -> None:
 
         source_image = resize_panel(source_image, image_width, image_height, is_mask=False)
         mask_image = resize_panel(mask_image, image_width, image_height, is_mask=True)
-        conditioning_image = resize_panel(conditioning_image, image_width, image_height, is_mask=False)
+        conditioning_image = resize_conditioning_panel(
+            conditioning_image,
+            image_width,
+            image_height,
+            conditioning_resize_modes,
+            0,
+        )
         if conditioning_image_2 is not None:
-            conditioning_image_2 = resize_panel(conditioning_image_2, image_width, image_height, is_mask=False)
+            conditioning_image_2 = resize_conditioning_panel(
+                conditioning_image_2,
+                image_width,
+                image_height,
+                conditioning_resize_modes,
+                1,
+            )
         generated_image = resize_panel(generated_image, image_width, image_height, is_mask=False)
         if target_image is not None:
             target_image = resize_panel(target_image, image_width, image_height, is_mask=False)

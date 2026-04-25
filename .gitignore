@@ -10,6 +10,7 @@ outputs/
 logs/
 checkpoints/
 datasets/
+models/
 tmp/
 cache/
 *.ckpt

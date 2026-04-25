@@ -33,14 +33,22 @@ def write_jsonl(records: list[dict], output_path: Path) -> None:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def resolve_pose_path(target_stem: str, pose_dir: Path) -> Path | None:
+    for suffix in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+        candidate = pose_dir / f"{target_stem}{suffix}"
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def attach_pose(records: list[dict], pose_dir: Path) -> list[dict]:
     transformed = []
     missing = []
     for record in records:
         target_path = Path(record["target_image"])
-        pose_path = pose_dir / f"{target_path.stem}.png"
-        if not pose_path.exists():
-            missing.append(str(pose_path))
+        pose_path = resolve_pose_path(target_path.stem, pose_dir)
+        if pose_path is None:
+            missing.append(str(pose_dir / f"{target_path.stem}.png"))
             continue
         new_record = dict(record)
         new_record["conditioning_image_2"] = str(pose_path.resolve())
