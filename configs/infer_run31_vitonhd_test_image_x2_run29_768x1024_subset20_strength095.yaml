@@ -1,0 +1,89 @@
+project:
+  name: sdxl_controlnet_inpaint_project
+  output_dir: ./outputs/run29_4gpu_cached_fast_dualcontrol_clothesrgb_headlesspose_image2_2000_flux_768x1024_50ep
+  seed: 42
+
+data:
+  all_metadata_path: ./datasets/external_768x1024_infer/run29_vitonhd_test_image_x2_clothesrgb_headlesspose/metadata/metadata_all.jsonl
+  train_metadata_path: ./datasets/image2_2000_flux_clothesrgb_headlesspose_dualcontrol/metadata_train_latent_cached_768x1024.jsonl
+  val_metadata_path: ./datasets/image2_2000_flux_clothesrgb_headlesspose_dualcontrol/metadata_val.jsonl
+  image_size: 768
+  image_width: 768
+  image_height: 1024
+  center_crop: false
+  random_flip: false
+  mask_dilate: 0
+  prompt_dropout: 0.0
+  invert_mask: true
+  conditioning_resize_modes:
+    - bilinear
+    - nearest
+
+model:
+  pretrained_model_name_or_path: /home/ouyanghaodong/.cache/huggingface/hub/models--diffusers--stable-diffusion-xl-1.0-inpainting-0.1/snapshots/115134f363124c53c7d878647567d04daf26e41e
+  controlnet_model_name_or_path: null
+  controlnet_model_name_or_paths:
+    - __from_unet__
+    - ./models/controlnet-openpose-sdxl-1.0-xinsir
+  num_controlnets: 2
+  vae_model_name_or_path: null
+  revision: null
+  variant: fp16
+  conditioning_type: dual_control
+  prediction_type: epsilon
+  attention_slicing: false
+
+training:
+  train_batch_size: 1
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
+  num_epochs: 50
+  max_train_steps: 24500
+  gradient_accumulation_steps: 1
+  learning_rate: 5.0e-06
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_epsilon: 1.0e-08
+  max_grad_norm: 1.0
+  lr_scheduler: constant
+  lr_warmup_steps: 0
+  mixed_precision: bf16
+  gradient_checkpointing: true
+  resume_from_checkpoint: null
+  save_every_steps: 500
+  validate_every_steps: 500
+  controlnet_conditioning_scale:
+    - 1.0
+    - 0.9
+  keep_region_loss_weight: 2.0
+  trainable_module_patterns:
+    - controlnet_cond_embedding
+    - controlnet_down_blocks
+    - controlnet_mid_block
+
+validation:
+  num_inference_steps: 30
+  guidance_scale: 5.0
+  max_val_samples: 4
+
+inference:
+  metadata_path: ./datasets/external_768x1024_infer/run31_vitonhd_test_image_x2_subset20/metadata_subset20.jsonl
+  checkpoint_dir: ./outputs/run29_4gpu_cached_fast_dualcontrol_clothesrgb_headlesspose_image2_2000_flux_768x1024_50ep/checkpoints/final
+  output_dir: ./outputs/run31_vitonhd_test_image_x2_run29_768x1024_subset20/generated
+  prompt: replace the human model with a smooth glossy white plastic retail mannequin, clearly non-human mannequin body, rigid mannequin limbs, no human skin, no flesh, no realistic face, no realistic hands, keep the exact clothes, garment texture, garment silhouette, pose, composition, and studio background
+  source_image: null
+  mask_image: null
+  conditioning_image: null
+  output_path: ./outputs/infer/sample.png
+  negative_prompt: real person, human, human skin, skin texture, flesh, realistic face, realistic hands, fingernails, eyelashes, eyebrows, lips, pores, veins, body hair, nipples, belly button, muscular anatomy, wrinkles, deformed body, extra limbs, blurry, low quality
+  num_inference_steps: 40
+  guidance_scale: 7.0
+  controlnet_conditioning_scale:
+    - 0.9
+    - 0.75
+  strength: 0.95
+  invert_mask: true
+  enable_model_cpu_offload: false

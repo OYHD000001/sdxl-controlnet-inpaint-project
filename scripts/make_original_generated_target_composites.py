@@ -74,8 +74,14 @@ def main() -> None:
     for record in load_jsonl(metadata_path):
         target_path = Path(record["target_image"])
         target_stem = target_path.stem
-        generated_path = infer_dir / f"{target_stem}_generated.png"
+        generated_stem = record.get("output_name") or target_stem
+        generated_path = infer_dir
+        if record.get("output_subdir"):
+            generated_path = generated_path / record["output_subdir"]
+        generated_path = generated_path / f"{generated_stem}_generated.png"
         original_path = find_original_image(original_dir, target_stem)
+        if original_path is None:
+            original_path = Path(record.get("source_image", "")) if record.get("source_image") else None
         if not generated_path.exists() or original_path is None:
             continue
 
@@ -90,7 +96,7 @@ def main() -> None:
                 ("target_white_plastic", target),
             ]
         )
-        composite.save(output_dir / f"{target_stem}_original_generated_target.png")
+        composite.save(output_dir / f"{generated_stem}_original_generated_target.png")
         made += 1
 
     print(output_dir.resolve())

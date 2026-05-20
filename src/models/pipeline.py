@@ -19,6 +19,7 @@ class SDXLControlNetInpaintComponents:
     unet: UNet2DConditionModel
     controlnets: list[ControlNetModel]
     noise_scheduler: DDPMScheduler
+    base_mode: str
 
 
 class SDXLControlNetInpaintTrainerPipeline:
@@ -38,6 +39,8 @@ class SDXLControlNetInpaintTrainerPipeline:
         self.aux_dtype = torch.float32
         self.controlnet_conditioning_scales = [1.0] * len(components.controlnets)
         self.attention_slicing = False
+        self.base_mode = components.base_mode
+        self.controlnet_train_dtype = torch.float32
 
     @staticmethod
     def _build_4ch_controlnet_from_inpaint_unet(unet: UNet2DConditionModel) -> ControlNetModel:
@@ -106,6 +109,9 @@ class SDXLControlNetInpaintTrainerPipeline:
         model_name = model_cfg["pretrained_model_name_or_path"]
         if not model_name:
             raise ValueError("model.pretrained_model_name_or_path must be set.")
+        base_mode = str(model_cfg.get("base_mode", "inpaint")).lower()
+        if base_mode not in {"inpaint", "t2i"}:
+            raise ValueError(f"Unsupported model.base_mode: {base_mode}")
 
         revision = model_cfg.get("revision")
         variant = model_cfg.get("variant")
@@ -157,7 +163,12 @@ class SDXLControlNetInpaintTrainerPipeline:
         controlnet_name = model_cfg.get("controlnet_model_name_or_path")
         controlnet_names = model_cfg.get("controlnet_model_name_or_paths")
         if controlnet_names:
-            controlnets = [load_controlnet(name) for name in controlnet_names]
+            controlnets = []
+            for name in controlnet_names:
+                if name in (None, "", "__from_unet__"):
+                    controlnets.append(cls._build_4ch_controlnet_from_inpaint_unet(unet))
+                else:
+                    controlnets.append(load_controlnet(name))
         elif controlnet_name:
             controlnets = [load_controlnet(controlnet_name)]
         else:
@@ -175,9 +186,17 @@ class SDXLControlNetInpaintTrainerPipeline:
             unet=unet,
             controlnets=controlnets,
             noise_scheduler=noise_scheduler,
+            base_mode=base_mode,
         )
         pipeline = cls(components=components, device=device)
         pipeline.attention_slicing = bool(model_cfg.get("attention_slicing", False))
+        controlnet_train_dtype = str(model_cfg.get("controlnet_train_dtype", "fp32")).lower()
+        if controlnet_train_dtype == "fp16":
+            pipeline.controlnet_train_dtype = torch.float16
+        elif controlnet_train_dtype == "bf16":
+            pipeline.controlnet_train_dtype = torch.bfloat16
+        else:
+            pipeline.controlnet_train_dtype = torch.float32
         return pipeline
 
     def to(self, device: torch.device) -> None:
@@ -195,9 +214,9 @@ class SDXLControlNetInpaintTrainerPipeline:
         self.components.unet.to(device=device, dtype=unet_dtype)
         if self.attention_slicing and hasattr(self.components.unet, "set_attention_slice"):
             self.components.unet.set_attention_slice("max")
-        # Keep trainable ControlNet weights in fp32 for stable optimization.
-        # Mixed-precision savings still come from autocast during the forward pass.
-        controlnet_dtype = torch.float32
+        # Keep trainable ControlNet weights in fp32 by default for stable optimization,
+        # but allow high-resolution runs to opt into bf16/fp16 when memory is tight.
+        controlnet_dtype = self.controlnet_train_dtype if device.type == "cuda" else torch.float32
         for controlnet in self.components.controlnets:
             controlnet.to(device=device, dtype=controlnet_dtype)
             if self.attention_slicing and hasattr(controlnet, "set_attention_slice"):
@@ -271,12 +290,22 @@ class SDXLControlNetInpaintTrainerPipeline:
         }
 
     def prepare_model_inputs(self, batch: dict[str, Any]) -> dict[str, torch.Tensor]:
-        if "target_latents" in batch and "masked_source_latents" in batch:
+        use_cached_inpaint_latents = self.base_mode == "inpaint" and "target_latents" in batch and "masked_source_latents" in batch
+        use_cached_t2i_latents = self.base_mode == "t2i" and "target_latents" in batch
+
+        if use_cached_inpaint_latents:
             target_latents = batch["target_latents"].to(self.device)
             masked_source_latents = batch["masked_source_latents"].to(self.device)
+        elif use_cached_t2i_latents:
+            target_latents = batch["target_latents"].to(self.device)
+            masked_source_latents = None
         else:
             target_latents = self.encode_images_to_latents(batch["target_image"])
-            masked_source_latents = self.encode_images_to_latents(batch["masked_source_image"])
+            masked_source_latents = (
+                self.encode_images_to_latents(batch["masked_source_image"])
+                if self.base_mode == "inpaint" and "masked_source_image" in batch
+                else None
+            )
 
         noise = torch.randn_like(target_latents)
         timesteps = torch.randint(
@@ -288,7 +317,20 @@ class SDXLControlNetInpaintTrainerPipeline:
         )
         noisy_latents = self.components.noise_scheduler.add_noise(target_latents, noise, timesteps)
         resized_mask = self.resize_mask_to_latent(batch["mask_image"], noisy_latents.shape)
-        model_input = torch.cat([noisy_latents, resized_mask, masked_source_latents], dim=1)
+        if self.base_mode == "inpaint":
+            if masked_source_latents is None:
+                raise ValueError("Inpaint mode requires masked_source_latents.")
+            model_input = torch.cat([noisy_latents, resized_mask, masked_source_latents], dim=1)
+            loss_mask = resized_mask
+            loss_mask_mode = "keep_region"
+        else:
+            model_input = noisy_latents
+            # In T2I mode the dataset mask is a clothes mask:
+            # white = clothes region, black = non-clothes region.
+            # Use it directly as the weighting mask so keep_region_loss_weight
+            # emphasizes clothes-region noise prediction.
+            loss_mask = resized_mask
+            loss_mask_mode = "mask_region"
 
         if "prompt_embeds" in batch and "pooled_prompt_embeds" in batch:
             prompt_data = {
@@ -312,7 +354,8 @@ class SDXLControlNetInpaintTrainerPipeline:
             "control_model_input": noisy_latents,
             "noisy_latents": noisy_latents,
             "masked_source_latents": masked_source_latents,
-            "mask": resized_mask,
+            "mask": loss_mask,
+            "mask_weight_mode": loss_mask_mode,
             "model_input": model_input,
             "conditioning_images": conditioning_images,
             "prompt_embeds": prompt_data["prompt_embeds"],
@@ -326,8 +369,11 @@ class SDXLControlNetInpaintTrainerPipeline:
         # Replace the placeholder SDXL added conditioning values with the exact
         # micro-conditioning setup required by your final chosen SDXL checkpoint.
         batch_size = prepared["target_latents"].shape[0]
-        height = int(batch["target_image"].shape[-2])
-        width = int(batch["target_image"].shape[-1])
+        spatial_ref = batch.get("target_image", batch.get("conditioning_image"))
+        if spatial_ref is None:
+            raise KeyError("Expected target_image or conditioning_image in batch for SDXL time_ids.")
+        height = int(spatial_ref.shape[-2])
+        width = int(spatial_ref.shape[-1])
         time_ids = torch.tensor(
             [[height, width, 0, 0, height, width]] * batch_size,
             device=self.device,

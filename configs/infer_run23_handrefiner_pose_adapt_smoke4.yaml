@@ -1,0 +1,36 @@
+project:
+  name: sdxl_controlnet_inpaint_project
+  output_dir: ./outputs/run23_handrefiner_pose_adapt_smoke4
+  seed: 42
+
+data:
+  image_size: 384
+  image_width: 384
+  image_height: 512
+  invert_mask: false
+  conditioning_resize_modes:
+    - bilinear
+    - nearest
+
+model:
+  pretrained_model_name_or_path: /home/ouyanghaodong/.cache/huggingface/hub/models--diffusers--stable-diffusion-xl-1.0-inpainting-0.1/snapshots/115134f363124c53c7d878647567d04daf26e41e
+  controlnet_model_name_or_paths:
+    - ./outputs/run22_4gpu_cached_fast_dualcontrol_clothesrgb_pose_sourcetarget2000_50ep/checkpoints/final/controlnet_0
+    - ./outputs/run22_4gpu_cached_fast_dualcontrol_clothesrgb_pose_sourcetarget2000_50ep/checkpoints/final/controlnet_1
+  num_controlnets: 2
+  variant: fp16
+
+inference:
+  metadata_path: ./datasets/handrefiner_pose_adapt/run23_metadata_smoke4.jsonl
+  checkpoint_dir: ./outputs/run23_lora_4gpu_dualcontrol_clothesrgb_pose_sourcetarget2000_from_run22_50ep/checkpoints/final
+  output_dir: ./outputs/run23_handrefiner_pose_adapt_smoke4
+  prompt: null
+  negative_prompt: "blurry hands, malformed hands, fused fingers, extra fingers, broken fingers, distorted wrists, changed clothes, changed sleeves, changed logo, changed pose, changed background, low quality, blurry"
+  num_inference_steps: 35
+  guidance_scale: 5.0
+  controlnet_conditioning_scale:
+    - 1.0
+    - 1.0
+  strength: 0.5
+  invert_mask: false
+  enable_model_cpu_offload: true

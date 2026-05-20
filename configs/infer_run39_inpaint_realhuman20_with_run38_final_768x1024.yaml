@@ -1,0 +1,54 @@
+project:
+  name: sdxl_controlnet_inpaint_project
+  output_dir: /data/ouyanghaodong/oyhd_20260318_extracted/sdxl_controlnet_inpaint_project/outputs/run39_inpaint_realhuman20_with_run38_final_768x1024
+  seed: 42
+
+data:
+  image_size: 768
+  image_width: 768
+  image_height: 1024
+  center_crop: false
+  random_flip: false
+  mask_dilate: 0
+  prompt_dropout: 0.0
+  invert_mask: true
+  conditioning_resize_modes:
+    - bilinear
+    - nearest
+
+model:
+  base_mode: inpaint
+  pretrained_model_name_or_path: /dev/shm/run38_sdxl_inpaint_base
+  controlnet_model_name_or_path: null
+  controlnet_model_name_or_paths:
+    - __from_unet__
+    - ./models/controlnet-openpose-sdxl-1.0-xinsir
+  num_controlnets: 2
+  vae_model_name_or_path: null
+  revision: null
+  variant: fp16
+  conditioning_type: dual_control
+  prediction_type: epsilon
+  attention_slicing: false
+  controlnet_train_dtype: bf16
+
+inference:
+  metadata_path: /data/ouyanghaodong/oyhd_20260318_extracted/sdxl_controlnet_inpaint_project/datasets/external_768x1024_infer/run39_image2_realhuman20_sourcehuman_clothesrgb_headlesspose/metadata_subset20.jsonl
+  checkpoint_dir: /data/ouyanghaodong/oyhd_20260318_extracted/sdxl_controlnet_inpaint_project/outputs/run38_inpaint_dualcontrol_clothesrgb_headlesspose_image2_2000_flux_sourcecutout_768x1024_50ep/checkpoints/final
+  output_dir: /data/ouyanghaodong/oyhd_20260318_extracted/sdxl_controlnet_inpaint_project/outputs/run39_inpaint_realhuman20_with_run38_final_768x1024/generated
+  prompt: null
+  source_image: null
+  mask_image: null
+  conditioning_image: null
+  output_path: /data/ouyanghaodong/oyhd_20260318_extracted/sdxl_controlnet_inpaint_project/outputs/run39_inpaint_realhuman20_with_run38_final_768x1024/sample.png
+  negative_prompt: low quality, blurry, distorted, deformed body, broken clothes, extra limbs, skeleton-like hands, bony hands, rough pose lines
+  num_inference_steps: 30
+  guidance_scale: 5.0
+  controlnet_conditioning_scale:
+    - 1.0
+    - 0.9
+  strength: 0.85
+  invert_mask: true
+  enable_model_cpu_offload: false
+  generate_pairs: true
+  pair_output_dir: /data/ouyanghaodong/oyhd_20260318_extracted/sdxl_controlnet_inpaint_project/outputs/run39_inpaint_realhuman20_with_run38_final_768x1024/original_generated_pairs

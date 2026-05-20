@@ -88,7 +88,11 @@ def main() -> None:
     made = 0
     for record in records:
         target_path = Path(record["target_image"])
-        generated_path = args.generated_dir / f"{target_path.stem}_generated.png"
+        generated_stem = record.get("output_name") or target_path.stem
+        generated_path = args.generated_dir
+        if record.get("output_subdir"):
+            generated_path = generated_path / record["output_subdir"]
+        generated_path = generated_path / f"{generated_stem}_generated.png"
         base = base_name_from_target(target_path)
         if args.source_field == "original_dir":
             if args.original_dir is None:

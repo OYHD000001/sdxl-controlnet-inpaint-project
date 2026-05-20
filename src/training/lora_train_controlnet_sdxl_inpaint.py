@@ -8,14 +8,13 @@ from typing import Any
 import torch
 from accelerate import Accelerator
 from accelerate.utils import set_seed
-from diffusers import ControlNetModel
+from peft import LoraConfig
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from src.data.dataset import SDXLControlNetInpaintDataset, collate_fn
 from src.models.pipeline import SDXLControlNetInpaintTrainerPipeline
 from src.training.losses import diffusion_mse_loss
-from src.training.validate import run_inference, run_validation
 from src.utils.io import ensure_dir, load_config, save_json
 
 try:
@@ -25,7 +24,7 @@ except Exception:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train SDXL + ControlNet + inpaint scaffold.")
+    parser = argparse.ArgumentParser(description="Train SDXL inpaint with frozen ControlNets and UNet LoRA.")
     parser.add_argument("--config", required=True, type=Path)
     return parser.parse_args()
 
@@ -45,21 +44,6 @@ def find_resume_checkpoint(resume_value: str | None, output_dir: Path) -> Path |
         return candidates[-1] if candidates else None
     checkpoint_path = Path(resume_value)
     return checkpoint_path if checkpoint_path.exists() else None
-
-
-def load_checkpoint_state(
-    pipeline: SDXLControlNetInpaintTrainerPipeline,
-    checkpoint_dir: Path,
-) -> int:
-    train_state = json.loads((checkpoint_dir / "train_state.json").read_text(encoding="utf-8"))
-    resume_step = int(train_state.get("global_step", 0))
-
-    for index, controlnet in enumerate(pipeline.components.controlnets):
-        controlnet_dir = checkpoint_dir / ("controlnet" if len(pipeline.components.controlnets) == 1 else f"controlnet_{index}")
-        restored = ControlNetModel.from_pretrained(controlnet_dir)
-        controlnet.load_state_dict(restored.state_dict(), strict=True)
-        del restored
-    return resume_step
 
 
 def normalize_loss_history_for_resume(loss_history_path: Path, resume_step: int) -> None:
@@ -86,7 +70,6 @@ def build_dataloader(config: dict[str, Any]) -> DataLoader:
         metadata_path=data_cfg["train_metadata_path"],
         image_height=int(data_cfg.get("image_height", data_cfg["image_size"])),
         image_width=int(data_cfg.get("image_width", data_cfg["image_size"])),
-        base_mode=str(config.get("model", {}).get("base_mode", "inpaint")).lower(),
         center_crop=data_cfg.get("center_crop", False),
         random_flip=data_cfg.get("random_flip", False),
         prompt_dropout=data_cfg.get("prompt_dropout", 0.0),
@@ -106,23 +89,78 @@ def build_dataloader(config: dict[str, Any]) -> DataLoader:
     )
 
 
-def build_optimizer(pipeline: SDXLControlNetInpaintTrainerPipeline, config: dict[str, Any]) -> torch.optim.Optimizer:
-    train_cfg = config["training"]
-    params = []
-    for controlnet in pipeline.components.controlnets:
-        params.extend([parameter for parameter in controlnet.parameters() if parameter.requires_grad])
-
-    # TODO:
-    # Decide whether UNet should be partially or fully trainable in your final setup.
-    # For the scaffold we only optimize ControlNet to stay close to the official baseline idea.
-    optimizer = AdamWOptim(
-        params,
-        lr=float(train_cfg["learning_rate"]),
-        betas=(float(train_cfg["adam_beta1"]), float(train_cfg["adam_beta2"])),
-        eps=float(train_cfg["adam_epsilon"]),
-        weight_decay=float(train_cfg["weight_decay"]),
+def attach_unet_lora(pipeline: SDXLControlNetInpaintTrainerPipeline, config: dict[str, Any]) -> None:
+    lora_cfg = config["training"]["lora"]
+    target_modules = list(lora_cfg.get("target_modules", ["to_q", "to_k", "to_v", "to_out.0"]))
+    adapter_name = str(lora_cfg.get("adapter_name", "default"))
+    peft_config = LoraConfig(
+        r=int(lora_cfg.get("rank", 16)),
+        lora_alpha=int(lora_cfg.get("alpha", 16)),
+        lora_dropout=float(lora_cfg.get("dropout", 0.0)),
+        bias=str(lora_cfg.get("bias", "none")),
+        target_modules=target_modules,
     )
-    return optimizer
+    pipeline.components.unet.add_adapter(peft_config, adapter_name=adapter_name)
+
+
+def set_lora_train_mode(pipeline: SDXLControlNetInpaintTrainerPipeline) -> None:
+    pipeline.components.text_encoder_one.requires_grad_(False)
+    pipeline.components.text_encoder_two.requires_grad_(False)
+    pipeline.components.vae.requires_grad_(False)
+    for controlnet in pipeline.components.controlnets:
+        controlnet.requires_grad_(False)
+        controlnet.eval()
+
+    pipeline.components.unet.requires_grad_(False)
+    for name, parameter in pipeline.components.unet.named_parameters():
+        if "lora_" in name:
+            parameter.requires_grad_(True)
+
+    pipeline.components.unet.train()
+    pipeline.components.text_encoder_one.eval()
+    pipeline.components.text_encoder_two.eval()
+    pipeline.components.vae.eval()
+
+
+def get_trainable_lora_params(unet: torch.nn.Module) -> list[torch.nn.Parameter]:
+    return [parameter for parameter in unet.parameters() if parameter.requires_grad]
+
+
+def build_optimizer(unet: torch.nn.Module, config: dict[str, Any]) -> torch.optim.Optimizer:
+    train_cfg = config["training"]
+    params = get_trainable_lora_params(unet)
+    return AdamWOptim(
+        params,
+        lr=train_cfg["learning_rate"],
+        betas=(train_cfg["adam_beta1"], train_cfg["adam_beta2"]),
+        eps=train_cfg["adam_epsilon"],
+        weight_decay=train_cfg["weight_decay"],
+    )
+
+
+def save_lora_checkpoint(
+    accelerator: Accelerator,
+    pipeline: SDXLControlNetInpaintTrainerPipeline,
+    checkpoint_dir: Path,
+    global_step: int,
+    metrics: dict[str, float],
+) -> None:
+    ensure_dir(checkpoint_dir)
+    unet = accelerator.unwrap_model(pipeline.components.unet)
+    lora_dir = checkpoint_dir / "unet_lora"
+    ensure_dir(lora_dir)
+    unet.save_lora_adapter(lora_dir, adapter_name="default")
+    save_json({"global_step": global_step, **metrics}, checkpoint_dir / "train_state.json")
+
+
+def load_lora_checkpoint(
+    pipeline: SDXLControlNetInpaintTrainerPipeline,
+    checkpoint_dir: Path,
+) -> int:
+    train_state = json.loads((checkpoint_dir / "train_state.json").read_text(encoding="utf-8"))
+    resume_step = int(train_state.get("global_step", 0))
+    pipeline.components.unet.load_lora_adapter(checkpoint_dir / "unet_lora", adapter_name="default")
+    return resume_step
 
 
 def train_one_step(
@@ -140,16 +178,10 @@ def train_one_step(
             loss_inputs["noise"],
             mask=loss_inputs["mask"],
             keep_region_weight=keep_region_loss_weight,
-            mask_weight_mode=loss_inputs.get("mask_weight_mode", "keep_region"),
         )
 
     accelerator.backward(loss)
-    params = [
-        p
-        for controlnet in pipeline.components.controlnets
-        for p in controlnet.parameters()
-        if p.grad is not None
-    ]
+    params = [p for p in pipeline.components.unet.parameters() if p.requires_grad and p.grad is not None]
     accelerator.clip_grad_norm_(params, max_grad_norm)
     optimizer.step()
     optimizer.zero_grad(set_to_none=True)
@@ -178,45 +210,39 @@ def main() -> None:
             loss_history_path.write_text("", encoding="utf-8")
     accelerator.wait_for_everyone()
 
-    seed = int(config["project"]["seed"])
-    set_seed(seed)
+    set_seed(int(config["project"]["seed"]))
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
 
     device = accelerator.device
     dataloader = build_dataloader(config)
     pipeline = SDXLControlNetInpaintTrainerPipeline.from_pretrained_config(config["model"], device=device)
+    attach_unet_lora(pipeline, config)
     pipeline.to(device)
     pipeline.controlnet_conditioning_scales = list(train_cfg.get("controlnet_conditioning_scale", [1.0] * len(pipeline.components.controlnets)))
+    set_lora_train_mode(pipeline)
+
     global_step = 0
     if resume_checkpoint_dir is not None:
-        global_step = load_checkpoint_state(pipeline, resume_checkpoint_dir)
+        global_step = load_lora_checkpoint(pipeline, resume_checkpoint_dir)
         if accelerator.is_main_process:
             normalize_loss_history_for_resume(loss_history_path, global_step)
-    pipeline.set_train(trainable_module_patterns=config["training"].get("trainable_module_patterns"))
+
     if train_cfg.get("gradient_checkpointing", False):
         pipeline.components.unet.enable_gradient_checkpointing()
-        for controlnet in pipeline.components.controlnets:
-            controlnet.enable_gradient_checkpointing()
-    optimizer = build_optimizer(pipeline, config)
-    prepared = accelerator.prepare(dataloader, optimizer, *pipeline.components.controlnets)
-    dataloader = prepared[0]
-    optimizer = prepared[1]
-    pipeline.components.controlnets = list(prepared[2:])
+
+    optimizer = build_optimizer(pipeline.components.unet, config)
+    dataloader, optimizer, unet = accelerator.prepare(dataloader, optimizer, pipeline.components.unet)
+    pipeline.components.unet = unet
 
     max_train_steps = int(train_cfg["max_train_steps"])
     save_every_steps = int(train_cfg["save_every_steps"])
-    validate_every_steps = int(train_cfg["validate_every_steps"])
+    keep_region_loss_weight = float(train_cfg.get("keep_region_loss_weight", 1.0))
 
-    progress_bar = tqdm(total=max_train_steps, desc="train", disable=not accelerator.is_main_process)
+    progress_bar = tqdm(total=max_train_steps, desc="lora-train", disable=not accelerator.is_main_process)
     if global_step > 0:
         progress_bar.update(global_step)
 
-    # TODO:
-    # Add resume-from-checkpoint support.
-    # Add mixed precision support.
-    # Add scheduler / warmup support.
-    # Add checkpoint serialization for ControlNet and optimizer state.
     while global_step < max_train_steps:
         for batch in dataloader:
             metrics = train_one_step(
@@ -225,39 +251,21 @@ def main() -> None:
                 optimizer=optimizer,
                 batch=batch,
                 max_grad_norm=float(train_cfg["max_grad_norm"]),
-                keep_region_loss_weight=float(train_cfg.get("keep_region_loss_weight", 1.0)),
+                keep_region_loss_weight=keep_region_loss_weight,
             )
             global_step += 1
             if accelerator.is_main_process:
                 progress_bar.update(1)
                 progress_bar.set_postfix(loss=f"{metrics['loss']:.4f}")
-
                 with loss_history_path.open("a", encoding="utf-8") as f:
-                    f.write(
-                        json.dumps(
-                            {
-                                "step": global_step,
-                                "loss": metrics["loss"],
-                            },
-                            ensure_ascii=False,
-                        )
-                        + "\n"
-                    )
+                    f.write(json.dumps({"step": global_step, "loss": metrics["loss"]}, ensure_ascii=False) + "\n")
 
             if global_step % save_every_steps == 0:
                 accelerator.wait_for_everyone()
                 if accelerator.is_main_process:
                     checkpoint_dir = output_dir / "checkpoints" / f"step_{global_step:08d}"
-                    ensure_dir(checkpoint_dir)
-                    for index, controlnet in enumerate(pipeline.components.controlnets):
-                        controlnet_dir = checkpoint_dir / ("controlnet" if len(pipeline.components.controlnets) == 1 else f"controlnet_{index}")
-                        accelerator.unwrap_model(controlnet).save_pretrained(controlnet_dir)
-                    save_json({"global_step": global_step, **metrics}, checkpoint_dir / "train_state.json")
+                    save_lora_checkpoint(accelerator, pipeline, checkpoint_dir, global_step, metrics)
                 accelerator.wait_for_everyone()
-
-            if validate_every_steps > 0 and global_step % validate_every_steps == 0:
-                if accelerator.is_main_process:
-                    run_validation(config)
 
             if global_step >= max_train_steps:
                 break
@@ -265,17 +273,8 @@ def main() -> None:
     final_dir = output_dir / "checkpoints" / "final"
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        ensure_dir(final_dir)
-        for index, controlnet in enumerate(pipeline.components.controlnets):
-            controlnet_dir = final_dir / ("controlnet" if len(pipeline.components.controlnets) == 1 else f"controlnet_{index}")
-            accelerator.unwrap_model(controlnet).save_pretrained(controlnet_dir)
-        save_json({"global_step": global_step}, final_dir / "train_state.json")
-        print(f"Training scaffold completed. Final artifacts saved to: {final_dir}")
-        if config.get("inference", {}).get("run_after_train", False):
-            infer_config = json.loads(json.dumps(config))
-            infer_config["inference"]["checkpoint_dir"] = str(final_dir.resolve())
-            print("Starting automatic post-train inference...")
-            run_inference(infer_config)
+        save_lora_checkpoint(accelerator, pipeline, final_dir, global_step, {"loss": metrics["loss"]})
+        print(f"LoRA training completed. Final artifacts saved to: {final_dir}")
 
 
 if __name__ == "__main__":

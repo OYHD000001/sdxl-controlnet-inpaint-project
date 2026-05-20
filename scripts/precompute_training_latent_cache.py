@@ -25,14 +25,19 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def save_tensor(tensor: torch.Tensor, path: Path) -> str:
+def save_tensor(tensor: torch.Tensor, path: Path, dtype: torch.dtype | None = torch.float16) -> str:
     ensure_dir(path.parent)
-    torch.save(tensor.detach().cpu().half(), path)
+    payload = tensor.detach().cpu()
+    if dtype is not None:
+        payload = payload.to(dtype=dtype)
+    torch.save(payload, path)
     return str(path)
 
 
 def encode_images_to_latents(vae: AutoencoderKL, images: torch.Tensor, device: torch.device) -> torch.Tensor:
-    images = images.to(device=device, dtype=next(vae.parameters()).dtype)
+    # Keep VAE encoding in fp32 for high-resolution SDXL latent caching.
+    # fp16 VAE encode is prone to NaNs on 768x1024 samples.
+    images = images.to(device=device, dtype=torch.float32)
     posterior = vae.encode(images).latent_dist
     latents = posterior.sample()
     return latents * vae.config.scaling_factor
@@ -82,6 +87,7 @@ def main() -> None:
         metadata_path=args.metadata,
         image_height=int(data_cfg.get("image_height", data_cfg["image_size"])),
         image_width=int(data_cfg.get("image_width", data_cfg["image_size"])),
+        base_mode=str(config.get("model", {}).get("base_mode", "inpaint")).lower(),
         center_crop=data_cfg.get("center_crop", False),
         random_flip=False,
         prompt_dropout=0.0,
@@ -127,7 +133,7 @@ def main() -> None:
         subfolder=vae_subfolder,
         revision=revision,
         variant=variant,
-        torch_dtype=dtype,
+        torch_dtype=torch.float32,
     ).to(device)
     text_encoder_one.eval()
     text_encoder_two.eval()
@@ -141,7 +147,9 @@ def main() -> None:
     with torch.no_grad():
         for batch in tqdm(dataloader, desc=f"cache {args.metadata.name}"):
             target_latents = encode_images_to_latents(vae, batch["target_image"], device)
-            masked_source_latents = encode_images_to_latents(vae, batch["masked_source_image"], device)
+            masked_source_latents = None
+            if "masked_source_image" in batch:
+                masked_source_latents = encode_images_to_latents(vae, batch["masked_source_image"], device)
             prompt_data = encode_prompt(
                 batch["text"],
                 tokenizer_one,
@@ -156,15 +164,26 @@ def main() -> None:
                 record = dict(batch["metadata"][item_index])
                 cache_stem = f"{cursor:06d}"
                 item_dir = args.cache_dir / cache_stem
-                record["target_latents"] = save_tensor(target_latents[item_index], item_dir / "target_latents.pt")
-                record["masked_source_latents"] = save_tensor(
-                    masked_source_latents[item_index],
-                    item_dir / "masked_source_latents.pt",
+                record["target_latents"] = save_tensor(
+                    target_latents[item_index],
+                    item_dir / "target_latents.pt",
+                    dtype=torch.float32,
                 )
-                record["prompt_embeds"] = save_tensor(prompt_data["prompt_embeds"][item_index], item_dir / "prompt_embeds.pt")
+                if masked_source_latents is not None:
+                    record["masked_source_latents"] = save_tensor(
+                        masked_source_latents[item_index],
+                        item_dir / "masked_source_latents.pt",
+                        dtype=torch.float32,
+                    )
+                record["prompt_embeds"] = save_tensor(
+                    prompt_data["prompt_embeds"][item_index],
+                    item_dir / "prompt_embeds.pt",
+                    dtype=torch.float16,
+                )
                 record["pooled_prompt_embeds"] = save_tensor(
                     prompt_data["pooled_prompt_embeds"][item_index],
                     item_dir / "pooled_prompt_embeds.pt",
+                    dtype=torch.float16,
                 )
                 updated_records.append(record)
                 cursor += 1

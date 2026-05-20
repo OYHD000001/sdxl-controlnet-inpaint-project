@@ -9,17 +9,15 @@ else
   PYTHON="${PYTHON:-python}"
 fi
 
-BASE_CONFIG="${BASE_CONFIG:-$ROOT/configs/train_sdxl_inpaint_controlnet_dualcontrol_pretrained_canny_headlesspose_whiteplastic800_4gpu_cached_fast_50ep.yaml}"
-METADATA_PATH="${METADATA_PATH:?METADATA_PATH is required}"
-RUN_NAME="${RUN_NAME:-run20_external_m2h_infer}"
-SUBSET_NAME="${SUBSET_NAME:?SUBSET_NAME is required}"
+BASE_CONFIG="${BASE_CONFIG:-$ROOT/configs/infer_run23_lora_image2_2000_clothesrgb_pose.yaml}"
+METADATA_PATH="${METADATA_PATH:-$ROOT/datasets/external_image2_infer/run23_image2_2000_clothesrgb_pose/metadata_all.jsonl}"
+RUN_NAME="${RUN_NAME:-run24_image2_2000_run23_lora}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$ROOT/outputs/$RUN_NAME/generated}"
 NUM_GPUS="${NUM_GPUS:-4}"
 PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-30}"
-SESSION_PREFIX="${SESSION_PREFIX:-subset_infer}"
+SESSION_PREFIX="${SESSION_PREFIX:-run24_image2_2000_lora}"
 
-SANITIZED_SUBSET="$(echo "$SUBSET_NAME" | tr '/' '_')"
-LAUNCH_ROOT="$ROOT/outputs/$RUN_NAME/$SANITIZED_SUBSET"
+LAUNCH_ROOT="$ROOT/outputs/$RUN_NAME"
 SHARD_ROOT="$LAUNCH_ROOT/shards"
 CONFIG_ROOT="$LAUNCH_ROOT/configs"
 LOG_ROOT="$LAUNCH_ROOT/logs"
@@ -29,13 +27,6 @@ mkdir -p "$SHARD_ROOT" "$CONFIG_ROOT" "$LOG_ROOT" "$OUTPUT_ROOT"
 export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
 export NO_PROXY="${NO_PROXY:-127.0.0.1,localhost}"
 export no_proxy="${no_proxy:-127.0.0.1,localhost}"
-ENABLE_MODEL_CPU_OFFLOAD="${ENABLE_MODEL_CPU_OFFLOAD:-false}"
-ENABLE_PAIR_COMPARISONS="${ENABLE_PAIR_COMPARISONS:-false}"
-PAIR_METADATA_PATH="${PAIR_METADATA_PATH:-$METADATA_PATH}"
-PAIR_OUTPUT_DIR="${PAIR_OUTPUT_DIR:-$ROOT/outputs/$RUN_NAME/original_generated_pairs}"
-PAIR_INTERVAL="${PAIR_INTERVAL:-20}"
-PAIR_IMAGE_WIDTH="${PAIR_IMAGE_WIDTH:-}"
-PAIR_IMAGE_HEIGHT="${PAIR_IMAGE_HEIGHT:-}"
 
 "$PYTHON" "$ROOT/scripts/shard_metadata_jsonl.py" \
   --input "$METADATA_PATH" \
@@ -43,7 +34,6 @@ PAIR_IMAGE_HEIGHT="${PAIR_IMAGE_HEIGHT:-}"
   --num-shards "$NUM_GPUS"
 
 for ((gpu=0; gpu<NUM_GPUS; gpu++)); do
-  export GPU_INDEX="$gpu"
   export SHARD_PATH="$SHARD_ROOT/shard_$(printf '%02d' "$gpu").jsonl"
   export CONFIG_PATH="$CONFIG_ROOT/infer_gpu_${gpu}.yaml"
   export SHARED_OUTPUT_ROOT="$OUTPUT_ROOT"
@@ -61,12 +51,7 @@ output_root = Path(os.environ["SHARED_OUTPUT_ROOT"])
 config = yaml.safe_load(base.read_text(encoding="utf-8"))
 config["inference"]["metadata_path"] = str(shard_path.resolve())
 config["inference"]["output_dir"] = str(output_root.resolve())
-config["inference"]["enable_model_cpu_offload"] = os.environ.get("ENABLE_MODEL_CPU_OFFLOAD", "false").lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
+config["inference"]["enable_model_cpu_offload"] = False
 config_path.write_text(yaml.safe_dump(config, sort_keys=False, allow_unicode=True), encoding="utf-8")
 print(config_path)
 PY
@@ -86,35 +71,13 @@ launch_session() {
 for ((gpu=0; gpu<NUM_GPUS; gpu++)); do
   session="${SESSION_PREFIX}_gpu_${gpu}"
   log_path="$LOG_ROOT/gpu_${gpu}.log"
-  cmd="cd '$ROOT' && CUDA_VISIBLE_DEVICES=$gpu '$PYTHON' -m src.training.validate --config '$CONFIG_ROOT/infer_gpu_${gpu}.yaml' --mode infer 2>&1 | tee '$log_path'"
+  cmd="cd '$ROOT' && CUDA_VISIBLE_DEVICES=$gpu '$PYTHON' -m src.training.lora_infer_controlnet_sdxl_inpaint --config '$CONFIG_ROOT/infer_gpu_${gpu}.yaml' 2>&1 | tee '$log_path'"
   launch_session "$session" "$cmd"
 done
 
 watch_session="${SESSION_PREFIX}_watch"
 watch_cmd="cd '$ROOT' && '$PYTHON' '$ROOT/scripts/watch_external_infer_progress.py' --metadata '$METADATA_PATH' --output-root '$OUTPUT_ROOT' --interval '$PROGRESS_INTERVAL'"
 launch_session "$watch_session" "$watch_cmd"
-
-if [[ "$ENABLE_PAIR_COMPARISONS" =~ ^(1|true|yes|on)$ ]]; then
-  if [[ -z "$PAIR_IMAGE_WIDTH" || -z "$PAIR_IMAGE_HEIGHT" ]]; then
-    read -r PAIR_IMAGE_WIDTH PAIR_IMAGE_HEIGHT < <(
-      "$PYTHON" - <<'PY'
-from pathlib import Path
-import os
-import yaml
-
-base = Path(os.environ["BASE_CONFIG_PATH"])
-config = yaml.safe_load(base.read_text(encoding="utf-8"))
-image_width = int(config["data"].get("image_width", config["data"]["image_size"]))
-image_height = int(config["data"].get("image_height", config["data"]["image_size"]))
-print(image_width, image_height)
-PY
-    )
-  fi
-
-  pair_session="${SESSION_PREFIX}_pairs"
-  pair_cmd="cd '$ROOT' && '$PYTHON' '$ROOT/scripts/make_original_generated_pairs.py' --metadata-path '$PAIR_METADATA_PATH' --generated-dir '$OUTPUT_ROOT' --output-dir '$PAIR_OUTPUT_DIR' --image-width '$PAIR_IMAGE_WIDTH' --image-height '$PAIR_IMAGE_HEIGHT' --interval '$PAIR_INTERVAL'"
-  launch_session "$pair_session" "$pair_cmd"
-fi
 
 echo "metadata: $METADATA_PATH"
 echo "output root: $OUTPUT_ROOT"

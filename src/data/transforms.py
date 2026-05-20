@@ -65,7 +65,7 @@ class SDXLTrainTransforms:
         target_image: Image.Image,
         source_image: Image.Image,
         mask_image: Image.Image,
-        masked_source_image: Image.Image,
+        masked_source_image: Image.Image | None,
         conditioning_image: Image.Image,
         conditioning_image_2: Image.Image | None = None,
     ) -> dict[str, Any]:
@@ -75,9 +75,10 @@ class SDXLTrainTransforms:
             "target_image": self._crop(self._resize(target_image, is_mask=False), is_mask=False),
             "source_image": self._crop(self._resize(source_image, is_mask=False), is_mask=False),
             "mask_image": self._crop(self._resize(mask_image, is_mask=True), is_mask=True),
-            "masked_source_image": self._crop(self._resize(masked_source_image, is_mask=False), is_mask=False),
             "conditioning_image": self._crop(self._resize_conditioning(conditioning_image, 0), is_mask=False),
         }
+        if masked_source_image is not None:
+            images["masked_source_image"] = self._crop(self._resize(masked_source_image, is_mask=False), is_mask=False)
         if conditioning_image_2 is not None:
             images["conditioning_image_2"] = self._crop(self._resize_conditioning(conditioning_image_2, 1), is_mask=False)
 
@@ -88,9 +89,10 @@ class SDXLTrainTransforms:
             "target_image": self._to_image_tensor(images["target_image"]),
             "source_image": self._to_image_tensor(images["source_image"]),
             "mask_image": self._to_mask_tensor(images["mask_image"]),
-            "masked_source_image": self._to_image_tensor(images["masked_source_image"]),
             "conditioning_image": self._to_conditioning_tensor(images["conditioning_image"]),
         }
+        if "masked_source_image" in images:
+            outputs["masked_source_image"] = self._to_image_tensor(images["masked_source_image"])
         if "conditioning_image_2" in images:
             outputs["conditioning_image_2"] = self._to_conditioning_tensor(images["conditioning_image_2"])
         return outputs
