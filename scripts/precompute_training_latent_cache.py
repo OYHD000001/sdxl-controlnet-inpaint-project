@@ -93,6 +93,10 @@ def main() -> None:
         prompt_dropout=0.0,
         invert_mask=data_cfg.get("invert_mask", False),
         conditioning_resize_modes=data_cfg.get("conditioning_resize_modes"),
+        prompt_override=config.get("project", {}).get("fixed_prompt"),
+        source_background_value=int(data_cfg.get("source_background_value", 0)),
+        canonical_pose_inpaint=bool(config.get("project", {}).get("canonical_pose_inpaint", False)),
+        condition_augmentation_cfg=None,
     )
     dataloader = DataLoader(
         dataset,
@@ -143,12 +147,15 @@ def main() -> None:
     ensure_dir(args.output_metadata.parent)
     updated_records: list[dict] = []
     cursor = 0
+    canonical_pose_inpaint = bool(config.get("project", {}).get("canonical_pose_inpaint", False))
+    condition_aug_enabled = bool(data_cfg.get("condition_augmentation", {}).get("enabled", False))
+    cache_masked_source_latents = not (canonical_pose_inpaint and condition_aug_enabled)
 
     with torch.no_grad():
         for batch in tqdm(dataloader, desc=f"cache {args.metadata.name}"):
             target_latents = encode_images_to_latents(vae, batch["target_image"], device)
             masked_source_latents = None
-            if "masked_source_image" in batch:
+            if "masked_source_image" in batch and cache_masked_source_latents:
                 masked_source_latents = encode_images_to_latents(vae, batch["masked_source_image"], device)
             prompt_data = encode_prompt(
                 batch["text"],

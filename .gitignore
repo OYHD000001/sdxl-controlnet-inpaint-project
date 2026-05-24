@@ -10,7 +10,9 @@ outputs/
 logs/
 checkpoints/
 datasets/
-models/
+models/*
+!models/__init__.py
+!models/pipeline.py
 tmp/
 cache/
 *.ckpt
@@ -23,6 +25,8 @@ cache/
 # Local experiment data and generated pilot assets
 examples/metadata_*.jsonl
 !examples/metadata_example.jsonl
+!examples/metadata_canonical_train.jsonl
+!examples/metadata_canonical_val.jsonl
 examples/pilot4_inputs/
 examples/pilot4_person_minus_clothes_masks/
 examples/pilot4_person_minus_clothes_masks_d12/

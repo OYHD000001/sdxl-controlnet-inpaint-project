@@ -37,10 +37,13 @@ class SDXLControlNetInpaintTrainerPipeline:
         self.device = device
         self.aux_device = torch.device("cpu")
         self.aux_dtype = torch.float32
+        self.vae_device = torch.device("cpu")
+        self.vae_dtype = torch.float32
         self.controlnet_conditioning_scales = [1.0] * len(components.controlnets)
         self.attention_slicing = False
         self.base_mode = components.base_mode
         self.controlnet_train_dtype = torch.float32
+        self.dynamic_vae_encode_on_gpu = False
 
     @staticmethod
     def _build_4ch_controlnet_from_inpaint_unet(unet: UNet2DConditionModel) -> ControlNetModel:
@@ -197,15 +200,18 @@ class SDXLControlNetInpaintTrainerPipeline:
             pipeline.controlnet_train_dtype = torch.bfloat16
         else:
             pipeline.controlnet_train_dtype = torch.float32
+        pipeline.dynamic_vae_encode_on_gpu = bool(model_cfg.get("dynamic_vae_encode_on_gpu", False))
         return pipeline
 
     def to(self, device: torch.device) -> None:
         self.device = device
         self.aux_device = torch.device("cpu") if device.type == "cuda" else device
         self.aux_dtype = torch.float32
+        self.vae_device = device if (device.type == "cuda" and self.dynamic_vae_encode_on_gpu) else self.aux_device
+        self.vae_dtype = torch.float32
         self.components.text_encoder_one.to(self.aux_device)
         self.components.text_encoder_two.to(self.aux_device)
-        self.components.vae.to(self.aux_device)
+        self.components.vae.to(self.vae_device)
         self.components.text_encoder_one.float()
         self.components.text_encoder_two.float()
         self.components.vae.float()
@@ -240,9 +246,17 @@ class SDXLControlNetInpaintTrainerPipeline:
         self.components.text_encoder_two.eval()
         self.components.vae.eval()
 
-    def encode_images_to_latents(self, images: torch.Tensor) -> torch.Tensor:
+    def encode_images_to_latents(
+        self,
+        images: torch.Tensor,
+        *,
+        encode_device: torch.device | None = None,
+        encode_dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        encode_device = encode_device or self.vae_device
+        encode_dtype = encode_dtype or self.vae_dtype
         with torch.no_grad():
-            posterior = self.components.vae.encode(images.to(self.aux_device, dtype=self.aux_dtype)).latent_dist
+            posterior = self.components.vae.encode(images.to(encode_device, dtype=encode_dtype)).latent_dist
             latents = posterior.sample()
             latents = latents * self.components.vae.config.scaling_factor
         return latents.to(self.device)
@@ -290,22 +304,26 @@ class SDXLControlNetInpaintTrainerPipeline:
         }
 
     def prepare_model_inputs(self, batch: dict[str, Any]) -> dict[str, torch.Tensor]:
-        use_cached_inpaint_latents = self.base_mode == "inpaint" and "target_latents" in batch and "masked_source_latents" in batch
-        use_cached_t2i_latents = self.base_mode == "t2i" and "target_latents" in batch
+        use_cached_target_latents = "target_latents" in batch
 
-        if use_cached_inpaint_latents:
+        if use_cached_target_latents:
             target_latents = batch["target_latents"].to(self.device)
-            masked_source_latents = batch["masked_source_latents"].to(self.device)
-        elif use_cached_t2i_latents:
-            target_latents = batch["target_latents"].to(self.device)
-            masked_source_latents = None
         else:
             target_latents = self.encode_images_to_latents(batch["target_image"])
-            masked_source_latents = (
-                self.encode_images_to_latents(batch["masked_source_image"])
-                if self.base_mode == "inpaint" and "masked_source_image" in batch
-                else None
-            )
+
+        masked_source_latents = None
+        if self.base_mode == "inpaint":
+            if "masked_source_latents" in batch:
+                masked_source_latents = batch["masked_source_latents"].to(self.device)
+            elif "masked_source_image" in batch:
+                # Canonical inpaint training keeps target latents cached but rebuilds
+                # masked_source_image on the fly. Force that dynamic clothes-image
+                # encode through the active training GPU VAE path.
+                masked_source_latents = self.encode_images_to_latents(
+                    batch["masked_source_image"],
+                    encode_device=self.device,
+                    encode_dtype=torch.float32,
+                )
 
         noise = torch.randn_like(target_latents)
         timesteps = torch.randint(

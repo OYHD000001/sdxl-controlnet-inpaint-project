@@ -1,0 +1,82 @@
+project:
+  name: canonical_real_to_mannequin_pose_inpaint
+  output_dir: ./outputs/canonical_real_to_mannequin_pose_inpaint
+  seed: 42
+  canonical_pose_inpaint: true
+  fixed_prompt: "replace the human model with a smooth glossy white plastic retail mannequin, clearly non-human mannequin body, rigid mannequin limbs, no human skin, no flesh, no realistic face, no realistic hands, keep the exact clothes, garment texture, garment silhouette, pose, composition, and studio background"
+
+model:
+  pretrained_model_name_or_path: diffusers/stable-diffusion-xl-1.0-inpainting-0.1
+  controlnet_model_name_or_path: ./models/controlnet-openpose-sdxl-1.0-xinsir
+  revision: null
+  variant: fp16
+  vae_model_name_or_path: null
+  base_mode: inpaint
+  attention_slicing: false
+  controlnet_train_dtype: fp32
+  dynamic_vae_encode_on_gpu: true
+
+data:
+  train_metadata_path: ./examples/metadata_canonical_train.jsonl
+  val_metadata_path: ./examples/metadata_canonical_val.jsonl
+  infer_metadata_path: ./examples/metadata_canonical_val.jsonl
+  image_size: 1024
+  image_width: 768
+  image_height: 1024
+  center_crop: false
+  random_flip: false
+  prompt_dropout: 0.0
+  invert_mask: true
+  source_background_value: 0
+  conditioning_resize_modes:
+    - nearest
+  condition_augmentation:
+    enabled: true
+    max_translate_px: 8
+    max_rotate_deg: 2.0
+    min_scale: 0.98
+    max_scale: 1.02
+    color_jitter_strength: 0.08
+    mask_morphology_px: 1
+    pose_max_translate_px: 4
+    pose_max_rotate_deg: 2.0
+
+training:
+  train_batch_size: 1
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
+  learning_rate: 1.0e-4
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_epsilon: 1.0e-8
+  weight_decay: 1.0e-2
+  max_grad_norm: 1.0
+  max_train_steps: 1000
+  mixed_precision: bf16
+  gradient_checkpointing: true
+  save_every_steps: 200
+  validate_every_steps: 200
+  resume_from_checkpoint: null
+  controlnet_conditioning_scale:
+    - 1.0
+  keep_region_loss_weight: 1.0
+  trainable_module_patterns: null
+
+inference:
+  checkpoint_dir: ./outputs/canonical_real_to_mannequin_pose_inpaint/checkpoints/final
+  metadata_path: ./examples/metadata_canonical_val.jsonl
+  output_dir: ./outputs/canonical_real_to_mannequin_pose_inpaint/generated
+  pair_output_dir: ./outputs/canonical_real_to_mannequin_pose_inpaint/original_generated_pairs
+  generate_pairs: true
+  run_after_train: false
+  prompt: null
+  negative_prompt: "real person, human, human skin, realistic face, realistic hands, blurry, low quality"
+  num_inference_steps: 30
+  guidance_scale: 5.0
+  controlnet_conditioning_scale:
+    - 1.0
+  invert_mask: true
+  strength: 1.0
+  enable_model_cpu_offload: false

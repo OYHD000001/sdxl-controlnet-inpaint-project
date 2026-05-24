@@ -8,6 +8,7 @@ import torch
 from diffusers import ControlNetModel, StableDiffusionXLControlNetInpaintPipeline, StableDiffusionXLControlNetPipeline
 from PIL import Image, ImageDraw
 from tqdm.auto import tqdm
+from preprocess.extract import assert_pipeline_consistency, prepare_inference_inputs
 from src.utils.io import ensure_dir, load_config, load_jsonl, load_pil_image
 from src.utils.masks import invert_binary_mask, invert_conditioning_image
 
@@ -129,6 +130,7 @@ def run_inference(config: dict[str, Any]) -> None:
     infer_cfg = config["inference"]
     base_mode = str(model_cfg.get("base_mode", "inpaint")).lower()
     invert_mask = bool(infer_cfg.get("invert_mask", config["data"].get("invert_mask", False)))
+    canonical_pose_inpaint = bool(config.get("project", {}).get("canonical_pose_inpaint", False))
 
     checkpoint_dir = Path(infer_cfg["checkpoint_dir"])
     if not checkpoint_dir.exists():
@@ -175,11 +177,24 @@ def run_inference(config: dict[str, Any]) -> None:
     pipe.set_progress_bar_config(disable=False)
     image_height = int(config["data"].get("image_height", config["data"]["image_size"]))
     image_width = int(config["data"].get("image_width", config["data"]["image_size"]))
+    source_background_value = int(config["data"].get("source_background_value", 0))
 
     metadata_path = Path(infer_cfg["metadata_path"])
     records = load_jsonl(metadata_path)
     output_dir = ensure_dir(infer_cfg["output_dir"])
     print(f"[infer] metadata={metadata_path} records={len(records)} output_dir={output_dir}", flush=True)
+    if canonical_pose_inpaint:
+        strength = float(infer_cfg["strength"])
+        if abs(strength - 1.0) > 1e-6:
+            raise AssertionError("Canonical pose-only inpaint inference requires strength == 1.0")
+        if records:
+            assert_pipeline_consistency(
+                records[0],
+                image_height=image_height,
+                image_width=image_width,
+                source_background_value=source_background_value,
+                conditioning_resize_mode=(config["data"].get("conditioning_resize_modes") or ["nearest"])[0],
+            )
     for idx, record in enumerate(tqdm(records, desc="infer"), start=1):
         stem = record.get("output_name") or Path(record["source_image"]).stem
         subdir = record.get("output_subdir")
@@ -209,20 +224,34 @@ def run_inference(config: dict[str, Any]) -> None:
             )
             control_image = conditioning_image if conditioning_image_2 is None else [conditioning_image, conditioning_image_2]
         else:
-            mask_image = load_pil_image(record["mask_image"]).convert("L")
-            if invert_mask:
-                mask_image = invert_binary_mask(mask_image)
-                if record["conditioning_image"] == record["mask_image"]:
-                    conditioning_image = invert_conditioning_image(conditioning_image)
-            source_image, mask_image, conditioning_image, conditioning_image_2 = _resize_for_inference(
-                source_image=source_image,
-                mask_image=mask_image,
-                conditioning_image=conditioning_image,
-                conditioning_image_2=conditioning_image_2,
-                image_height=image_height,
-                image_width=image_width,
-                conditioning_resize_modes=config["data"].get("conditioning_resize_modes"),
-            )
+            if canonical_pose_inpaint:
+                canonical = prepare_inference_inputs(
+                    source_image=source_image,
+                    clothes_mask=load_pil_image(record["mask_image"]).convert("L"),
+                    pose_image=conditioning_image,
+                    image_height=image_height,
+                    image_width=image_width,
+                    source_background_value=source_background_value,
+                    conditioning_resize_mode=(config["data"].get("conditioning_resize_modes") or ["nearest"])[0],
+                )
+                source_image = canonical["masked_source_image"]
+                mask_image = canonical["mask_image"]
+                conditioning_image = canonical["conditioning_image"]
+            else:
+                mask_image = load_pil_image(record["mask_image"]).convert("L")
+                if invert_mask:
+                    mask_image = invert_binary_mask(mask_image)
+                    if record["conditioning_image"] == record["mask_image"]:
+                        conditioning_image = invert_conditioning_image(conditioning_image)
+                source_image, mask_image, conditioning_image, conditioning_image_2 = _resize_for_inference(
+                    source_image=source_image,
+                    mask_image=mask_image,
+                    conditioning_image=conditioning_image,
+                    conditioning_image_2=conditioning_image_2,
+                    image_height=image_height,
+                    image_width=image_width,
+                    conditioning_resize_modes=config["data"].get("conditioning_resize_modes"),
+                )
             control_image = conditioning_image if conditioning_image_2 is None else [conditioning_image, conditioning_image_2]
         with torch.inference_mode():
             if base_mode == "t2i":

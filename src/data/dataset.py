@@ -8,6 +8,7 @@ import torch
 from torch.utils.data import Dataset
 from PIL import Image
 
+from preprocess.extract import prepare_training_tensors
 from src.data.transforms import build_train_transforms
 from src.utils.io import load_jsonl, load_pil_image
 from src.utils.masks import (
@@ -63,6 +64,10 @@ class SDXLControlNetInpaintDataset(Dataset):
         prompt_dropout: float = 0.0,
         invert_mask: bool = False,
         conditioning_resize_modes: list[str] | None = None,
+        prompt_override: str | None = None,
+        source_background_value: int = 0,
+        canonical_pose_inpaint: bool = False,
+        condition_augmentation_cfg: dict[str, Any] | None = None,
     ) -> None:
         self.metadata_path = Path(metadata_path)
         self.records = load_jsonl(self.metadata_path)
@@ -76,6 +81,10 @@ class SDXLControlNetInpaintDataset(Dataset):
         self.base_mode = base_mode
         self.prompt_dropout = prompt_dropout
         self.invert_mask = invert_mask
+        self.prompt_override = prompt_override
+        self.source_background_value = source_background_value
+        self.canonical_pose_inpaint = canonical_pose_inpaint
+        self.condition_augmentation_cfg = condition_augmentation_cfg or {}
 
     def __len__(self) -> int:
         return len(self.records)
@@ -107,20 +116,18 @@ class SDXLControlNetInpaintDataset(Dataset):
         has_cached_prompt = bool(sample.prompt_embeds and sample.pooled_prompt_embeds)
         has_cached_target_latents = bool(sample.target_latents)
         has_cached_masked_source_latents = bool(sample.masked_source_latents)
-        use_cached_t2i_latents = self.base_mode == "t2i" and has_cached_target_latents and has_cached_prompt
-        use_cached_inpaint_latents = (
-            self.base_mode == "inpaint"
-            and has_cached_target_latents
-            and has_cached_masked_source_latents
-            and has_cached_prompt
-        )
+        use_cached_target_latents = has_cached_target_latents and has_cached_prompt
 
-        if use_cached_t2i_latents or use_cached_inpaint_latents:
+        if use_cached_target_latents:
             placeholder_size = conditioning_image.size
             target_image = Image.new("RGB", placeholder_size, color=0)
-            source_image = Image.new("RGB", placeholder_size, color=0)
         else:
             target_image = load_pil_image(sample.target_image).convert("RGB")
+
+        need_real_source = self.base_mode == "inpaint" and not has_cached_masked_source_latents
+        if use_cached_target_latents and not need_real_source:
+            source_image = Image.new("RGB", conditioning_image.size, color=0)
+        else:
             source_image = load_pil_image(sample.source_image).convert("RGB")
 
         if self.invert_mask and self.base_mode == "inpaint":
@@ -130,23 +137,36 @@ class SDXLControlNetInpaintDataset(Dataset):
 
         masked_source_image = None
         if self.base_mode == "inpaint":
-            if use_cached_inpaint_latents:
+            if has_cached_masked_source_latents:
                 masked_source_image = None
             elif sample.masked_source_image:
                 masked_source_image = load_pil_image(sample.masked_source_image).convert("RGB")
             else:
                 masked_source_image = apply_binary_mask_to_image(source_image, mask_image)
 
-        transformed = self.transforms(
-            target_image=target_image,
-            source_image=source_image,
-            mask_image=mask_image,
-            masked_source_image=masked_source_image,
-            conditioning_image=conditioning_image,
-            conditioning_image_2=conditioning_image_2,
-        )
+        if self.canonical_pose_inpaint:
+            transformed = prepare_training_tensors(
+                target_image=target_image,
+                source_image=source_image,
+                clothes_mask=load_pil_image(sample.mask_image).convert("L"),
+                pose_image=conditioning_image,
+                image_height=self.transforms.image_height,
+                image_width=self.transforms.image_width,
+                source_background_value=self.source_background_value,
+                conditioning_resize_mode=(self.transforms.conditioning_resize_modes or ["nearest"])[0],
+                condition_augmentation_cfg=self.condition_augmentation_cfg,
+            )
+        else:
+            transformed = self.transforms(
+                target_image=target_image,
+                source_image=source_image,
+                mask_image=mask_image,
+                masked_source_image=masked_source_image,
+                conditioning_image=conditioning_image,
+                conditioning_image_2=conditioning_image_2,
+            )
 
-        text = maybe_drop_prompt(sample.text, self.prompt_dropout)
+        text = maybe_drop_prompt(self.prompt_override or sample.text, self.prompt_dropout)
 
         batch = {
             "target_image": transformed["target_image"],
