@@ -143,6 +143,8 @@ def run_inference(config: dict[str, Any]) -> None:
         while (checkpoint_dir / f"controlnet_{index}").exists():
             controlnet_dirs.append(checkpoint_dir / f"controlnet_{index}")
             index += 1
+    elif (checkpoint_dir / "controlnet").exists():
+        controlnet_dirs.append(checkpoint_dir / "controlnet")
     else:
         controlnet_dirs.append(checkpoint_dir)
 
@@ -165,6 +167,15 @@ def run_inference(config: dict[str, Any]) -> None:
             variant=model_cfg.get("variant"),
             torch_dtype=torch_dtype,
         )
+    lora_dir = checkpoint_dir / "unet_lora"
+    if lora_dir.exists():
+        pipe.unet.load_lora_adapter(lora_dir, adapter_name="default")
+        if hasattr(pipe.unet, "set_adapters"):
+            pipe.unet.set_adapters(["default"], adapter_weights=[1.0])
+        elif hasattr(pipe.unet, "set_adapter"):
+            pipe.unet.set_adapter("default")
+        lora_params = sum(parameter.numel() for name, parameter in pipe.unet.named_parameters() if "lora_" in name)
+        print(f"[infer] loaded UNet LoRA adapter from {lora_dir} (params={lora_params})", flush=True)
     print("[infer] pipeline loaded", flush=True)
     if hasattr(pipe, "enable_vae_slicing"):
         pipe.enable_vae_slicing()
@@ -213,6 +224,8 @@ def run_inference(config: dict[str, Any]) -> None:
         original_size = source_image.size
         prompt = infer_cfg.get("prompt") or record["text"]
         control_scales = infer_cfg.get("controlnet_conditioning_scale", 1.0)
+        if isinstance(control_scales, list) and len(control_scales) == 1:
+            control_scales = float(control_scales[0])
         control_image = None
         if base_mode == "t2i":
             conditioning_image, conditioning_image_2 = _resize_conditioning_for_t2i(

@@ -60,6 +60,9 @@ def load_checkpoint_state(
         restored = ControlNetModel.from_pretrained(controlnet_dir)
         controlnet.load_state_dict(restored.state_dict(), strict=True)
         del restored
+    lora_dir = checkpoint_dir / "unet_lora"
+    if lora_dir.exists():
+        pipeline.components.unet.load_lora_adapter(lora_dir, adapter_name=pipeline.unet_lora_adapter_name)
     return resume_step
 
 
@@ -113,15 +116,32 @@ def build_dataloader(config: dict[str, Any]) -> DataLoader:
 
 def build_optimizer(pipeline: SDXLControlNetInpaintTrainerPipeline, config: dict[str, Any]) -> torch.optim.Optimizer:
     train_cfg = config["training"]
-    params = []
-    for controlnet in pipeline.components.controlnets:
-        params.extend([parameter for parameter in controlnet.parameters() if parameter.requires_grad])
-
-    # TODO:
-    # Decide whether UNet should be partially or fully trainable in your final setup.
-    # For the scaffold we only optimize ControlNet to stay close to the official baseline idea.
+    controlnet_params = [
+        parameter
+        for controlnet in pipeline.components.controlnets
+        for parameter in controlnet.parameters()
+        if parameter.requires_grad
+    ]
+    unet_lora_params = pipeline.get_unet_lora_trainable_parameters()
+    param_groups = []
+    if controlnet_params:
+        param_groups.append(
+            {
+                "params": controlnet_params,
+                "lr": float(train_cfg["learning_rate"]),
+            }
+        )
+    if unet_lora_params:
+        param_groups.append(
+            {
+                "params": unet_lora_params,
+                "lr": float(train_cfg.get("unet_lora_learning_rate", train_cfg["learning_rate"])),
+            }
+        )
+    if not param_groups:
+        raise ValueError("No trainable parameters were found for optimizer construction.")
     optimizer = AdamWOptim(
-        params,
+        param_groups,
         lr=float(train_cfg["learning_rate"]),
         betas=(float(train_cfg["adam_beta1"]), float(train_cfg["adam_beta2"])),
         eps=float(train_cfg["adam_epsilon"]),
@@ -245,11 +265,12 @@ def train_one_step(
 
     accelerator.backward(loss)
     params = [
-        p
+        parameter
         for controlnet in pipeline.components.controlnets
-        for p in controlnet.parameters()
-        if p.grad is not None
+        for parameter in controlnet.parameters()
+        if parameter.grad is not None
     ]
+    params.extend([parameter for parameter in pipeline.components.unet.parameters() if parameter.requires_grad and parameter.grad is not None])
     accelerator.clip_grad_norm_(params, max_grad_norm)
     optimizer.step()
     optimizer.zero_grad(set_to_none=True)
@@ -292,12 +313,25 @@ def train_from_config(config: dict[str, Any]) -> None:
     pipeline = SDXLControlNetInpaintTrainerPipeline.from_pretrained_config(config["model"], device=device)
     pipeline.to(device)
     pipeline.controlnet_conditioning_scales = list(train_cfg.get("controlnet_conditioning_scale", [1.0] * len(pipeline.components.controlnets)))
+    pipeline.set_train(
+        trainable_module_patterns=config["training"].get("trainable_module_patterns"),
+        unet_lora_cfg=config["training"].get("unet_lora"),
+    )
     global_step = 0
     if resume_checkpoint_dir is not None:
         global_step = load_checkpoint_state(pipeline, resume_checkpoint_dir)
         if accelerator.is_main_process:
             normalize_loss_history_for_resume(loss_history_path, global_step)
-    pipeline.set_train(trainable_module_patterns=config["training"].get("trainable_module_patterns"))
+    if accelerator.is_main_process:
+        stats = pipeline.get_trainable_param_stats()
+        print(
+            f"ControlNet trainable params: {stats['controlnet_trainable']} / {stats['controlnet_total']}",
+            flush=True,
+        )
+        print(
+            f"UNet LoRA trainable params: {stats['unet_lora_trainable']} / {stats['unet_total']}",
+            flush=True,
+        )
     if train_cfg.get("gradient_checkpointing", False):
         pipeline.components.unet.enable_gradient_checkpointing()
         for controlnet in pipeline.components.controlnets:
@@ -375,6 +409,12 @@ def train_from_config(config: dict[str, Any]) -> None:
                     for index, controlnet in enumerate(pipeline.components.controlnets):
                         controlnet_dir = checkpoint_dir / ("controlnet" if len(pipeline.components.controlnets) == 1 else f"controlnet_{index}")
                         accelerator.unwrap_model(controlnet).save_pretrained(controlnet_dir)
+                    unet_lora_dir = checkpoint_dir / "unet_lora"
+                    if pipeline.unet_lora_enabled:
+                        accelerator.unwrap_model(pipeline.components.unet).save_lora_adapter(
+                            unet_lora_dir,
+                            adapter_name=pipeline.unet_lora_adapter_name,
+                        )
                     save_json(
                         {
                             "global_step": global_step,
@@ -398,6 +438,11 @@ def train_from_config(config: dict[str, Any]) -> None:
         for index, controlnet in enumerate(pipeline.components.controlnets):
             controlnet_dir = final_dir / ("controlnet" if len(pipeline.components.controlnets) == 1 else f"controlnet_{index}")
             accelerator.unwrap_model(controlnet).save_pretrained(controlnet_dir)
+        if pipeline.unet_lora_enabled:
+            accelerator.unwrap_model(pipeline.components.unet).save_lora_adapter(
+                final_dir / "unet_lora",
+                adapter_name=pipeline.unet_lora_adapter_name,
+            )
         save_json({"global_step": global_step}, final_dir / "train_state.json")
         print(f"Training scaffold completed. Final artifacts saved to: {final_dir}")
         if config.get("inference", {}).get("run_after_train", False):

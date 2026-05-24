@@ -6,6 +6,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 from diffusers import AutoencoderKL, ControlNetModel, DDPMScheduler, UNet2DConditionModel
+from peft import LoraConfig
 from transformers import AutoTokenizer, CLIPTextModel, CLIPTextModelWithProjection
 
 
@@ -44,6 +45,8 @@ class SDXLControlNetInpaintTrainerPipeline:
         self.base_mode = components.base_mode
         self.controlnet_train_dtype = torch.float32
         self.dynamic_vae_encode_on_gpu = False
+        self.unet_lora_adapter_name = "default"
+        self.unet_lora_enabled = False
 
     @staticmethod
     def _build_4ch_controlnet_from_inpaint_unet(unet: UNet2DConditionModel) -> ControlNetModel:
@@ -228,11 +231,42 @@ class SDXLControlNetInpaintTrainerPipeline:
             if self.attention_slicing and hasattr(controlnet, "set_attention_slice"):
                 controlnet.set_attention_slice("max")
 
-    def set_train(self, trainable_module_patterns: list[str] | None = None) -> None:
+    def enable_unet_lora(self, lora_cfg: dict[str, Any] | None) -> None:
+        if not lora_cfg or not bool(lora_cfg.get("enabled", False)):
+            self.unet_lora_enabled = False
+            return
+        adapter_name = str(lora_cfg.get("adapter_name", "default"))
+        target_modules = list(lora_cfg.get("target_modules", ["to_q", "to_k", "to_v", "to_out.0"]))
+        existing = set()
+        peft_config = getattr(self.components.unet, "peft_config", None)
+        if isinstance(peft_config, dict):
+            existing = set(peft_config.keys())
+        if adapter_name not in existing:
+            config = LoraConfig(
+                r=int(lora_cfg.get("rank", 16)),
+                lora_alpha=int(lora_cfg.get("alpha", 16)),
+                lora_dropout=float(lora_cfg.get("dropout", 0.0)),
+                bias=str(lora_cfg.get("bias", "none")),
+                target_modules=target_modules,
+            )
+            self.components.unet.add_adapter(config, adapter_name=adapter_name)
+        self.unet_lora_adapter_name = adapter_name
+        self.unet_lora_enabled = True
+
+    def set_train(
+        self,
+        trainable_module_patterns: list[str] | None = None,
+        unet_lora_cfg: dict[str, Any] | None = None,
+    ) -> None:
         self.components.text_encoder_one.requires_grad_(False)
         self.components.text_encoder_two.requires_grad_(False)
         self.components.vae.requires_grad_(False)
         self.components.unet.requires_grad_(False)
+        self.enable_unet_lora(unet_lora_cfg)
+        if self.unet_lora_enabled:
+            for name, parameter in self.components.unet.named_parameters():
+                if "lora_" in name:
+                    parameter.requires_grad_(True)
         for controlnet in self.components.controlnets:
             controlnet.requires_grad_(True)
             if trainable_module_patterns:
@@ -241,10 +275,30 @@ class SDXLControlNetInpaintTrainerPipeline:
                     if any(pattern in name for pattern in trainable_module_patterns):
                         parameter.requires_grad_(True)
             controlnet.train()
-        self.components.unet.eval()
+        self.components.unet.train() if self.unet_lora_enabled else self.components.unet.eval()
         self.components.text_encoder_one.eval()
         self.components.text_encoder_two.eval()
         self.components.vae.eval()
+
+    def get_unet_lora_trainable_parameters(self) -> list[torch.nn.Parameter]:
+        return [parameter for name, parameter in self.components.unet.named_parameters() if parameter.requires_grad and "lora_" in name]
+
+    def get_trainable_param_stats(self) -> dict[str, int]:
+        controlnet_trainable = sum(
+            parameter.numel()
+            for controlnet in self.components.controlnets
+            for parameter in controlnet.parameters()
+            if parameter.requires_grad
+        )
+        controlnet_total = sum(parameter.numel() for controlnet in self.components.controlnets for parameter in controlnet.parameters())
+        unet_lora_trainable = sum(parameter.numel() for parameter in self.get_unet_lora_trainable_parameters())
+        unet_total = sum(parameter.numel() for parameter in self.components.unet.parameters())
+        return {
+            "controlnet_trainable": controlnet_trainable,
+            "controlnet_total": controlnet_total,
+            "unet_lora_trainable": unet_lora_trainable,
+            "unet_total": unet_total,
+        }
 
     def encode_images_to_latents(
         self,
