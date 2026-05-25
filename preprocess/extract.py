@@ -108,6 +108,10 @@ def maybe_augment_condition_inputs(
         clothes_image = ImageEnhance.Brightness(clothes_image).enhance(brightness)
         clothes_image = ImageEnhance.Contrast(clothes_image).enhance(contrast)
         clothes_image = ImageEnhance.Color(clothes_image).enhance(saturation)
+        bg_value = int(augment_cfg.get("background_value", 255))
+        restored = Image.new("RGB", clothes_image.size, (bg_value, bg_value, bg_value))
+        restored.paste(clothes_image, mask=clothes_mask)
+        clothes_image = restored
 
     morphology_px = int(augment_cfg.get("mask_morphology_px", 0))
     if morphology_px > 0:

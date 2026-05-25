@@ -130,6 +130,12 @@ Implementation entry:
 
 - `target_image` is encoded to latents and noised.
 - `masked_source_image` is encoded without adding noise.
+- The frozen base UNet can run in reduced precision while UNet LoRA remains trainable in fp32.
+  - Configure this via `model.unet_base_dtype`
+  - Recommended pairing:
+    - `mixed_precision: bf16` with `model.unet_base_dtype: bf16`
+    - `mixed_precision: fp16` with `model.unet_base_dtype: fp16`
+    - `mixed_precision: no` with `model.unet_base_dtype: fp32`
 - The 9-channel UNet input is:
   - `cat([noisy_latents(4), resized_mask(1), masked_source_latents(4)])`
   - this follows the native `diffusers` SDXL inpainting channel contract
@@ -195,6 +201,7 @@ These are controlled from:
 - `data.condition_augmentation` in [configs/default.yaml](configs/default.yaml)
 
 `target_image / x0` always remains clean.
+When color jitter is enabled, the background placeholder is restored after jitter so the white fill value stays consistent with inference.
 
 ## Installation
 
@@ -207,6 +214,16 @@ pip install -r requirements.txt
 
 ## Assumptions
 
-- The canonical path uses a zero-valued RGB background when constructing clothes-only masked images.
+- The canonical path uses a configurable RGB placeholder when constructing clothes-only masked images.
+- For the current real-to-mannequin LoRA setup, this placeholder is typically white (`255`).
 - Pose extraction itself is project-specific; load/export helpers live in [preprocess/pose.py](preprocess/pose.py), but the actual detector backend is left pluggable.
 - Historical dual-control, LoRA, T2I, and other experimental files remain in the repository for reference, but they are not the default path described here.
+
+## Checkpoint Compatibility
+
+- Old checkpoints without `unet_lora/` remain loadable.
+- In that case the pipeline restores ControlNet weights and skips LoRA loading.
+- New LoRA-enabled checkpoints save:
+  - `controlnet/` or `controlnet_*`
+  - `unet_lora/`
+  - `train_state.json`

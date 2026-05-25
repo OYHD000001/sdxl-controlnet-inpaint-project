@@ -62,7 +62,28 @@ def load_checkpoint_state(
         del restored
     lora_dir = checkpoint_dir / "unet_lora"
     if lora_dir.exists():
-        pipeline.components.unet.load_lora_adapter(lora_dir, adapter_name=pipeline.unet_lora_adapter_name)
+        adapter_name = pipeline.unet_lora_adapter_name
+        unet = pipeline.components.unet
+        weight_name = None
+        if (lora_dir / "pytorch_lora_weights.safetensors").exists():
+            weight_name = "pytorch_lora_weights.safetensors"
+        elif (lora_dir / "pytorch_lora_weights.bin").exists():
+            weight_name = "pytorch_lora_weights.bin"
+        if hasattr(unet, "delete_adapters"):
+            peft_config = getattr(unet, "peft_config", None)
+            if isinstance(peft_config, dict) and adapter_name in peft_config:
+                try:
+                    unet.delete_adapters([adapter_name])
+                except Exception:
+                    pass
+        load_kwargs = {"adapter_name": adapter_name, "prefix": None}
+        if weight_name is not None:
+            load_kwargs["weight_name"] = weight_name
+        unet.load_lora_adapter(lora_dir, **load_kwargs)
+        for name, parameter in unet.named_parameters():
+            if "lora_" in name:
+                parameter.data = parameter.data.to(torch.float32)
+        pipeline.unet_lora_enabled = True
     return resume_step
 
 
@@ -333,14 +354,24 @@ def train_from_config(config: dict[str, Any]) -> None:
             flush=True,
         )
     if train_cfg.get("gradient_checkpointing", False):
+        if pipeline.unet_lora_enabled and hasattr(pipeline.components.unet, "enable_input_require_grads"):
+            pipeline.components.unet.enable_input_require_grads()
         pipeline.components.unet.enable_gradient_checkpointing()
         for controlnet in pipeline.components.controlnets:
             controlnet.enable_gradient_checkpointing()
     optimizer = build_optimizer(pipeline, config)
-    prepared = accelerator.prepare(dataloader, optimizer, *pipeline.components.controlnets)
+    prepare_args = [dataloader, optimizer]
+    if pipeline.unet_lora_enabled:
+        prepare_args.append(pipeline.components.unet)
+    prepare_args.extend(pipeline.components.controlnets)
+    prepared = accelerator.prepare(*prepare_args)
     dataloader = prepared[0]
     optimizer = prepared[1]
-    pipeline.components.controlnets = list(prepared[2:])
+    index = 2
+    if pipeline.unet_lora_enabled:
+        pipeline.components.unet = prepared[index]
+        index += 1
+    pipeline.components.controlnets = list(prepared[index:])
 
     max_train_steps = int(train_cfg["max_train_steps"])
     save_every_steps = int(train_cfg["save_every_steps"])

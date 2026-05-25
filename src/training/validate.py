@@ -169,11 +169,22 @@ def run_inference(config: dict[str, Any]) -> None:
         )
     lora_dir = checkpoint_dir / "unet_lora"
     if lora_dir.exists():
-        pipe.unet.load_lora_adapter(lora_dir, adapter_name="default")
-        if hasattr(pipe.unet, "set_adapters"):
-            pipe.unet.set_adapters(["default"], adapter_weights=[1.0])
-        elif hasattr(pipe.unet, "set_adapter"):
+        weight_name = None
+        if (lora_dir / "pytorch_lora_weights.safetensors").exists():
+            weight_name = "pytorch_lora_weights.safetensors"
+        elif (lora_dir / "pytorch_lora_weights.bin").exists():
+            weight_name = "pytorch_lora_weights.bin"
+        load_kwargs = {"adapter_name": "default", "prefix": None}
+        if weight_name is not None:
+            load_kwargs["weight_name"] = weight_name
+        pipe.unet.load_lora_adapter(lora_dir, **load_kwargs)
+        if hasattr(pipe.unet, "set_adapter"):
             pipe.unet.set_adapter("default")
+        elif hasattr(pipe.unet, "set_adapters"):
+            try:
+                pipe.unet.set_adapters(["default"], adapter_weights=[1.0])
+            except TypeError:
+                pipe.unet.set_adapters(["default"])
         lora_params = sum(parameter.numel() for name, parameter in pipe.unet.named_parameters() if "lora_" in name)
         print(f"[infer] loaded UNet LoRA adapter from {lora_dir} (params={lora_params})", flush=True)
     print("[infer] pipeline loaded", flush=True)

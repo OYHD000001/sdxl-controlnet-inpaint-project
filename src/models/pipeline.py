@@ -45,6 +45,7 @@ class SDXLControlNetInpaintTrainerPipeline:
         self.base_mode = components.base_mode
         self.controlnet_train_dtype = torch.float32
         self.dynamic_vae_encode_on_gpu = False
+        self.unet_base_dtype = torch.bfloat16
         self.unet_lora_adapter_name = "default"
         self.unet_lora_enabled = False
 
@@ -203,6 +204,12 @@ class SDXLControlNetInpaintTrainerPipeline:
             pipeline.controlnet_train_dtype = torch.bfloat16
         else:
             pipeline.controlnet_train_dtype = torch.float32
+        unet_base_dtype = str(model_cfg.get("unet_base_dtype", "bf16")).lower()
+        pipeline.unet_base_dtype = {
+            "fp16": torch.float16,
+            "bf16": torch.bfloat16,
+            "fp32": torch.float32,
+        }.get(unet_base_dtype, torch.bfloat16)
         pipeline.dynamic_vae_encode_on_gpu = bool(model_cfg.get("dynamic_vae_encode_on_gpu", False))
         return pipeline
 
@@ -219,7 +226,7 @@ class SDXLControlNetInpaintTrainerPipeline:
         self.components.text_encoder_two.float()
         self.components.vae.float()
 
-        unet_dtype = torch.float16 if device.type == "cuda" else torch.float32
+        unet_dtype = self.unet_base_dtype if device.type == "cuda" else torch.float32
         self.components.unet.to(device=device, dtype=unet_dtype)
         if self.attention_slicing and hasattr(self.components.unet, "set_attention_slice"):
             self.components.unet.set_attention_slice("max")
@@ -250,6 +257,11 @@ class SDXLControlNetInpaintTrainerPipeline:
                 target_modules=target_modules,
             )
             self.components.unet.add_adapter(config, adapter_name=adapter_name)
+        # Keep LoRA weights in fp32 for stable optimization while the frozen base
+        # UNet remains in reduced precision for efficient forward passes.
+        for name, parameter in self.components.unet.named_parameters():
+            if "lora_" in name:
+                parameter.data = parameter.data.to(torch.float32)
         self.unet_lora_adapter_name = adapter_name
         self.unet_lora_enabled = True
 

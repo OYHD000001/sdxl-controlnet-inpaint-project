@@ -26,6 +26,7 @@ data:
     min_scale: 0.98
     max_scale: 1.02
     color_jitter_strength: 0.08
+    background_value: 255
     mask_morphology_px: 1
     pose_max_translate_px: 4
     pose_max_rotate_deg: 2.0
@@ -43,6 +44,7 @@ model:
   attention_slicing: false
   controlnet_train_dtype: bf16
   dynamic_vae_encode_on_gpu: true
+  unet_base_dtype: bf16
 
 training:
   train_batch_size: 1
