@@ -130,6 +130,10 @@ Implementation entry:
 
 - `target_image` is encoded to latents and noised.
 - `masked_source_image` is encoded without adding noise.
+- For the 9-channel SDXL Inpaint UNet path, `training.keep_region_loss_weight` should stay
+  at or above `1.0` (recommended range `1.0-2.0`).
+  Lower values encourage the UNet to ignore the masked-image conditioning channels and replace
+  clothing instead of preserving it.
 - The frozen base UNet can run in reduced precision while UNet LoRA remains trainable in fp32.
   - Configure this via `model.unet_base_dtype`
   - Recommended pairing:
@@ -162,6 +166,27 @@ The canonical inference wrapper enforces:
 - `strength == 1.0`
 - one pose ControlNet only
 - shared preprocessing consistency check
+
+### Inference Inpaint Blending
+
+For the native 9-channel `StableDiffusionXLControlNetInpaintPipeline`, diffusers does not apply the
+same keep-region latent blending used by the 4-channel image-to-image path.
+That means clothing preservation is otherwise left entirely to the learned masked-image conditioning
+channels.
+
+To hard-preserve the keep region during inference, this repository supports:
+
+- `inference.enforce_keep_region_blend: true`
+
+When enabled, inference registers a `callback_on_step_end` hook and explicitly blends the keep
+region back toward the source-image latent on every denoising step:
+
+- keep region (`mask = 0`) is pulled back toward the encoded source latent
+- redraw region (`mask = 1`) keeps the model-predicted latent
+
+This is the recommended default for the canonical 9-channel inpaint path.
+Set it to `false` only when you deliberately want to inspect the raw diffusers behavior without the
+extra keep-region correction.
 
 The generated images are written to:
 

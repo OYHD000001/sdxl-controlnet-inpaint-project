@@ -1,6 +1,6 @@
 project:
-  name: canonical_real_to_mannequin_pose_inpaint_2000_768x1024_50ep_run43_unfreeze
-  output_dir: ./outputs/run43_canonical_real_to_mannequin_pose_inpaint_2000_768x1024_50ep_unfreeze
+  name: canonical_real_to_mannequin_pose_inpaint_2000_768x1024_50ep_run44_keepblend
+  output_dir: ./outputs/run44_canonical_real_to_mannequin_pose_inpaint_2000_768x1024_50ep_keepblend
   seed: 42
   canonical_pose_inpaint: true
   fixed_prompt: "product photo of clothing on a white plastic mannequin, plain white studio background"
@@ -88,8 +88,8 @@ validation:
 
 inference:
   metadata_path: ./datasets/canonical_real_to_mannequin_pose_inpaint_2000_768x1024/metadata_val.jsonl
-  checkpoint_dir: ./outputs/run43_canonical_real_to_mannequin_pose_inpaint_2000_768x1024_50ep_unfreeze/checkpoints/final
-  output_dir: ./outputs/run43_canonical_real_to_mannequin_pose_inpaint_2000_768x1024_50ep_unfreeze/infer_val200
+  checkpoint_dir: ./outputs/run44_canonical_real_to_mannequin_pose_inpaint_2000_768x1024_50ep_keepblend/checkpoints/final
+  output_dir: ./outputs/run44_canonical_real_to_mannequin_pose_inpaint_2000_768x1024_50ep_keepblend/infer_val200
   prompt: null
   negative_prompt: "human, real person, hair, hat, complex background"
   num_inference_steps: 30
@@ -101,12 +101,12 @@ inference:
   enforce_keep_region_blend: true
   enable_model_cpu_offload: true
   generate_pairs: true
-  pair_output_dir: ./outputs/run43_canonical_real_to_mannequin_pose_inpaint_2000_768x1024_50ep_unfreeze/original_generated_pairs
+  pair_output_dir: ./outputs/run44_canonical_real_to_mannequin_pose_inpaint_2000_768x1024_50ep_keepblend/original_generated_pairs
   generate_debug_composites: true
-  debug_output_dir: ./outputs/run43_canonical_real_to_mannequin_pose_inpaint_2000_768x1024_50ep_unfreeze/inference_debug_composites
+  debug_output_dir: ./outputs/run44_canonical_real_to_mannequin_pose_inpaint_2000_768x1024_50ep_keepblend/inference_debug_composites
   run_after_train: false
 
 preview:
   metadata_path: ./datasets/canonical_real_to_mannequin_pose_inpaint_2000_768x1024/metadata_train_preview4.jsonl
-  output_dir: ./outputs/run43_canonical_real_to_mannequin_pose_inpaint_2000_768x1024_50ep_unfreeze/epoch_previews
+  output_dir: ./outputs/run44_canonical_real_to_mannequin_pose_inpaint_2000_768x1024_50ep_keepblend/epoch_previews
   every_epochs: 1

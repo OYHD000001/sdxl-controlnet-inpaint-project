@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.nn.functional as F
+import torchvision.transforms.functional as TF
 from diffusers import ControlNetModel, StableDiffusionXLControlNetInpaintPipeline, StableDiffusionXLControlNetPipeline
 from PIL import Image, ImageDraw
 from tqdm.auto import tqdm
@@ -52,6 +54,22 @@ def build_pair(original: Image.Image, generated: Image.Image) -> Image.Image:
     return canvas
 
 
+def build_debug_grid(panels: list[tuple[str, Image.Image]], image_width: int, image_height: int) -> Image.Image:
+    labeled = []
+    for label, image in panels:
+        labeled.append(add_label(resize_panel(image.convert("RGB"), image_width, image_height), label))
+    canvas = Image.new(
+        "RGB",
+        (sum(panel.width for panel in labeled), max(panel.height for panel in labeled)),
+        (245, 245, 245),
+    )
+    offset = 0
+    for panel in labeled:
+        canvas.paste(panel, (offset, 0))
+        offset += panel.width
+    return canvas
+
+
 def make_original_generated_pairs_once(
     metadata_path: Path,
     generated_dir: Path,
@@ -74,6 +92,67 @@ def make_original_generated_pairs_once(
         original = resize_panel(load_pil_image(source_path).convert("RGB"), image_width, image_height)
         generated = resize_panel(load_pil_image(generated_path).convert("RGB"), image_width, image_height)
         build_pair(original, generated).save(out_path)
+        made += 1
+    return made
+
+
+def make_inference_debug_composites_once(
+    metadata_path: Path,
+    generated_dir: Path,
+    output_dir: Path,
+    *,
+    image_width: int,
+    image_height: int,
+    source_background_value: int,
+    conditioning_resize_mode: str,
+    canonical_pose_inpaint: bool,
+) -> int:
+    output_dir = ensure_dir(output_dir)
+    made = 0
+    for record in load_jsonl(metadata_path):
+        source_path = Path(record["source_image"])
+        stem = record.get("output_name") or source_path.stem
+        generated_path = generated_dir
+        if record.get("output_subdir"):
+            generated_path = generated_path / record["output_subdir"]
+        generated_path = generated_path / f"{stem}_generated.png"
+        out_path = output_dir / f"{stem}_debug.png"
+        if out_path.exists() or not generated_path.exists():
+            continue
+
+        source_image = load_pil_image(record["source_image"]).convert("RGB")
+        target_image = load_pil_image(record["target_image"]).convert("RGB")
+        clothes_mask = load_pil_image(record["mask_image"]).convert("L")
+        pose_image = load_pil_image(record["conditioning_image"]).convert("RGB")
+        generated_image = load_pil_image(generated_path).convert("RGB")
+
+        if canonical_pose_inpaint:
+            canonical = prepare_inference_inputs(
+                source_image=source_image,
+                clothes_mask=clothes_mask,
+                pose_image=pose_image,
+                image_height=image_height,
+                image_width=image_width,
+                source_background_value=source_background_value,
+                conditioning_resize_mode=conditioning_resize_mode,
+            )
+            masked_source_image = canonical["masked_source_image"]
+            mask_image = canonical["mask_image"]
+            pose_view = canonical["conditioning_image"]
+        else:
+            masked_source_image = source_image
+            mask_image = clothes_mask.convert("RGB")
+            pose_view = pose_image
+
+        panels = [
+            ("source", source_image),
+            ("masked_source", masked_source_image),
+            ("mask", mask_image.convert("RGB") if mask_image.mode != "RGB" else mask_image),
+            ("pose", pose_view),
+            ("generated", generated_image),
+            ("target", target_image),
+        ]
+        build_debug_grid(panels, image_width=image_width, image_height=image_height).save(out_path)
         made += 1
     return made
 
@@ -124,6 +203,124 @@ def _resize_conditioning_for_t2i(
     return resized_conditioning, resized_conditioning_2
 
 
+def _encode_image_to_latents_for_blend(
+    pipe: StableDiffusionXLControlNetInpaintPipeline,
+    image: Image.Image,
+    device: torch.device,
+) -> torch.Tensor:
+    image_tensor = TF.to_tensor(image.convert("RGB")).unsqueeze(0).to(device)
+    image_tensor = image_tensor * 2.0 - 1.0
+    vae_dtype = getattr(pipe.vae, "dtype", torch.float32)
+    image_tensor = image_tensor.to(dtype=vae_dtype)
+    if torch.cuda.is_available():
+        pipe.vae.to(device)
+    with torch.no_grad():
+        encoded = pipe.vae.encode(image_tensor)
+        latents = encoded.latent_dist.sample() * pipe.vae.config.scaling_factor
+    return latents.to(device=device, dtype=pipe.unet.dtype)
+
+
+def make_blend_callback(
+    *,
+    image_latents: torch.Tensor,
+    scheduler: Any,
+    debug_prefix: str | None = None,
+):
+    printed = {"done": False}
+
+    def callback(pipe_self, step_index, timestep, callback_kwargs):
+        latents = callback_kwargs["latents"]
+        mask = callback_kwargs["mask"]
+        bsz = latents.shape[0]
+        if mask.shape[0] != bsz:
+            mask = mask[:bsz]
+        if mask.shape[-2:] != latents.shape[-2:]:
+            mask = F.interpolate(mask.float(), size=latents.shape[-2:], mode="nearest")
+        mask = mask.to(device=latents.device, dtype=latents.dtype)
+        img_lat = image_latents.to(device=latents.device, dtype=latents.dtype)
+
+        timesteps = scheduler.timesteps
+        if step_index < len(timesteps) - 1:
+            t_next = timesteps[step_index + 1]
+            noise = torch.randn_like(img_lat)
+            if torch.is_tensor(t_next):
+                timestep_tensor = t_next.reshape(1).to(device=img_lat.device, dtype=torch.long)
+            else:
+                timestep_tensor = torch.tensor([int(t_next)], device=img_lat.device, dtype=torch.long)
+            init_latents_noisy = scheduler.add_noise(img_lat, noise, timestep_tensor)
+        else:
+            init_latents_noisy = img_lat
+
+        if not printed["done"]:
+            print(
+                f"[infer-blend] {debug_prefix or ''} step={step_index} "
+                f"latents.shape={tuple(latents.shape)} mask.shape={tuple(mask.shape)} "
+                f"mask.dtype={mask.dtype} mask.min={float(mask.min().item()):.4f} mask.max={float(mask.max().item()):.4f}",
+                flush=True,
+            )
+            printed["done"] = True
+
+        callback_kwargs["latents"] = (1.0 - mask) * init_latents_noisy + mask * latents
+        return callback_kwargs
+
+    return callback
+
+
+def _encode_keep_region_image_latents(
+    pipe: StableDiffusionXLControlNetInpaintPipeline,
+    source_image: Image.Image,
+    torch_dtype: torch.dtype,
+) -> torch.Tensor:
+    image_tensor = TF.to_tensor(source_image.convert("RGB")).unsqueeze(0)
+    image_tensor = image_tensor.mul(2.0).sub(1.0)
+    target_device = pipe._execution_device if hasattr(pipe, "_execution_device") else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if hasattr(pipe.vae, "to"):
+        pipe.vae.to(target_device)
+    image_tensor = image_tensor.to(device=target_device, dtype=pipe.vae.dtype)
+    with torch.no_grad():
+        encoded = pipe.vae.encode(image_tensor)
+        image_latents = encoded.latent_dist.sample() * pipe.vae.config.scaling_factor
+    return image_latents.to(device=target_device, dtype=torch_dtype)
+
+
+def make_keep_region_blend_callback(
+    *,
+    image_latents: torch.Tensor,
+    scheduler: Any,
+) -> Any:
+    state = {"printed": False}
+
+    def callback(pipe_self: Any, step_index: int, t: torch.Tensor, callback_kwargs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        latents = callback_kwargs["latents"]
+        mask = callback_kwargs["mask"]
+        if mask.shape[0] != latents.shape[0]:
+            mask = mask[: latents.shape[0]]
+        if mask.shape[-2:] != latents.shape[-2:]:
+            mask = F.interpolate(mask.float(), size=latents.shape[-2:], mode="nearest")
+        mask = mask.to(device=latents.device, dtype=latents.dtype)
+        if not state["printed"]:
+            print(
+                f"[blend] latents={tuple(latents.shape)} mask={tuple(mask.shape)} "
+                f"dtype={mask.dtype} min={float(mask.min().item()):.4f} max={float(mask.max().item()):.4f}",
+                flush=True,
+            )
+            state["printed"] = True
+
+        img_lat = image_latents.to(device=latents.device, dtype=latents.dtype)
+        timesteps = scheduler.timesteps
+        if step_index < len(timesteps) - 1:
+            t_next = timesteps[step_index + 1]
+            noise = torch.randn_like(img_lat)
+            next_t = torch.tensor([t_next], device=img_lat.device, dtype=torch.long)
+            init_latents_noisy = scheduler.add_noise(img_lat, noise, next_t)
+        else:
+            init_latents_noisy = img_lat
+        callback_kwargs["latents"] = (1.0 - mask) * init_latents_noisy + mask * latents
+        return callback_kwargs
+
+    return callback
+
+
 def run_inference(config: dict[str, Any]) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_cfg = config["model"]
@@ -131,6 +328,7 @@ def run_inference(config: dict[str, Any]) -> None:
     base_mode = str(model_cfg.get("base_mode", "inpaint")).lower()
     invert_mask = bool(infer_cfg.get("invert_mask", config["data"].get("invert_mask", False)))
     canonical_pose_inpaint = bool(config.get("project", {}).get("canonical_pose_inpaint", False))
+    enforce_blend = bool(infer_cfg.get("enforce_keep_region_blend", True))
 
     checkpoint_dir = Path(infer_cfg["checkpoint_dir"])
     if not checkpoint_dir.exists():
@@ -277,6 +475,14 @@ def run_inference(config: dict[str, Any]) -> None:
                     conditioning_resize_modes=config["data"].get("conditioning_resize_modes"),
                 )
             control_image = conditioning_image if conditioning_image_2 is None else [conditioning_image, conditioning_image_2]
+        blend_callback = None
+        if canonical_pose_inpaint and base_mode == "inpaint" and enforce_blend:
+            image_latents_for_blend = _encode_image_to_latents_for_blend(pipe, source_image, device=device)
+            blend_callback = make_blend_callback(
+                image_latents=image_latents_for_blend,
+                scheduler=pipe.scheduler,
+                debug_prefix=stem,
+            )
         with torch.inference_mode():
             if base_mode == "t2i":
                 result = pipe(
@@ -290,7 +496,7 @@ def run_inference(config: dict[str, Any]) -> None:
                     width=image_width,
                 )
             else:
-                result = pipe(
+                pipe_call_kwargs = dict(
                     prompt=prompt,
                     image=source_image,
                     mask_image=mask_image,
@@ -301,6 +507,10 @@ def run_inference(config: dict[str, Any]) -> None:
                     controlnet_conditioning_scale=control_scales,
                     strength=float(infer_cfg["strength"]),
                 )
+                if blend_callback is not None:
+                    pipe_call_kwargs["callback_on_step_end"] = blend_callback
+                    pipe_call_kwargs["callback_on_step_end_tensor_inputs"] = ["latents", "mask"]
+                result = pipe(**pipe_call_kwargs)
         image = result.images[0]
         if image.size != original_size:
             image = image.resize(original_size, Image.BILINEAR)
@@ -319,6 +529,20 @@ def run_inference(config: dict[str, Any]) -> None:
                 image_height=image_height,
             )
             print(f"generated original/generated pairs: made={made}")
+    if infer_cfg.get("generate_debug_composites", False):
+        debug_output_dir = infer_cfg.get("debug_output_dir")
+        if debug_output_dir:
+            made = make_inference_debug_composites_once(
+                metadata_path=metadata_path,
+                generated_dir=output_dir,
+                output_dir=Path(debug_output_dir),
+                image_width=image_width,
+                image_height=image_height,
+                source_background_value=source_background_value,
+                conditioning_resize_mode=(config["data"].get("conditioning_resize_modes") or ["nearest"])[0],
+                canonical_pose_inpaint=canonical_pose_inpaint,
+            )
+            print(f"generated inference debug composites: made={made}")
 
 
 def main() -> None:

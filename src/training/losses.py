@@ -14,6 +14,13 @@ def diffusion_mse_loss(
     """
     Standard diffusion epsilon-prediction MSE loss.
 
+    For the 9-channel SDXL inpaint UNet path, the pipeline does not perform
+    explicit keep-region latent blending for us. Preservation of the clothes
+    region is therefore learned through the masked-image conditioning channels.
+    Keep `keep_region_weight >= 1.0` (typically 1.0-2.0) so the model has
+    enough incentive to copy those channels instead of hallucinating average
+    training-distribution clothing in the keep region.
+
     TODO:
     - add optional v_prediction support if the final scheduler/model setup uses it
     - add masked loss weighting only if experiments prove it helps
