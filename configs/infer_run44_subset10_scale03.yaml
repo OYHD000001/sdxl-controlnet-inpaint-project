@@ -19,17 +19,6 @@ data:
   source_background_value: 255
   conditioning_resize_modes:
     - nearest
-  condition_augmentation:
-    enabled: true
-    max_translate_px: 8
-    max_rotate_deg: 2.0
-    min_scale: 0.98
-    max_scale: 1.02
-    color_jitter_strength: 0.08
-    background_value: 255
-    mask_morphology_px: 1
-    pose_max_translate_px: 4
-    pose_max_rotate_deg: 2.0
 
 model:
   base_mode: inpaint
@@ -46,67 +35,22 @@ model:
   dynamic_vae_encode_on_gpu: true
   unet_base_dtype: bf16
 
-training:
-  train_batch_size: 1
-  num_workers: 4
-  pin_memory: true
-  persistent_workers: true
-  prefetch_factor: 4
-  num_epochs: 50
-  max_train_steps: 30000
-  gradient_accumulation_steps: 1
-  learning_rate: 5.0e-05
-  unet_lora_learning_rate: 1.0e-04
-  weight_decay: 0.01
-  adam_beta1: 0.9
-  adam_beta2: 0.999
-  adam_epsilon: 1.0e-08
-  max_grad_norm: 1.0
-  lr_scheduler: constant
-  lr_warmup_steps: 0
-  mixed_precision: bf16
-  gradient_checkpointing: true
-  resume_from_checkpoint: null
-  save_every_steps: 6000
-  validate_every_steps: 0
-  controlnet_conditioning_scale:
-    - 1.0
-  keep_region_loss_weight: 1.5
-  trainable_module_patterns: null
-  unet_lora:
-    enabled: true
-    rank: 16
-    alpha: 16
-    dropout: 0.0
-    target_modules: ["to_q", "to_k", "to_v", "to_out.0"]
-    adapter_name: default
-
-validation:
-  num_inference_steps: 30
-  guidance_scale: 5.0
-  max_val_samples: 4
-
 inference:
-  metadata_path: ./datasets/canonical_real_to_mannequin_pose_inpaint_2000_768x1024/metadata_val.jsonl
+  metadata_path: ./datasets/canonical_real_to_mannequin_pose_inpaint_2000_768x1024/subsets/metadata_val_subset10_same.jsonl
   checkpoint_dir: ./outputs/run44_canonical_real_to_mannequin_pose_inpaint_2000_768x1024_50ep_keepblend/checkpoints/final
-  output_dir: ./outputs/run44_canonical_real_to_mannequin_pose_inpaint_2000_768x1024_50ep_keepblend/infer_val200
-  prompt: null
+  output_dir: ./outputs/run44_scale03_subset10_promptv2/infer_subset10
+  prompt: "a smooth glossy white plastic retail mannequin, clearly non-human mannequin body, rigid mannequin limbs, no human skin, no flesh, no realistic face, keep the exact clothes, garment texture, garment silhouette, pose, composition, and white background"
   negative_prompt: "human, real person, hair, hat, complex background"
   num_inference_steps: 30
   guidance_scale: 5.0
   controlnet_conditioning_scale:
-    - 1.0
+    - 0.3
   strength: 1.0
   invert_mask: true
   enforce_keep_region_blend: true
   enable_model_cpu_offload: true
   generate_pairs: true
-  pair_output_dir: ./outputs/run44_canonical_real_to_mannequin_pose_inpaint_2000_768x1024_50ep_keepblend/original_generated_pairs
+  pair_output_dir: ./outputs/run44_scale03_subset10_promptv2/original_generated_pairs
   generate_debug_composites: true
-  debug_output_dir: ./outputs/run44_canonical_real_to_mannequin_pose_inpaint_2000_768x1024_50ep_keepblend/inference_debug_composites
+  debug_output_dir: ./outputs/run44_scale03_subset10_promptv2/inference_debug_composites
   run_after_train: false
-
-preview:
-  metadata_path: ./datasets/canonical_real_to_mannequin_pose_inpaint_2000_768x1024/metadata_train_preview4.jsonl
-  output_dir: ./outputs/run44_canonical_real_to_mannequin_pose_inpaint_2000_768x1024_50ep_keepblend/epoch_previews
-  every_epochs: 1
